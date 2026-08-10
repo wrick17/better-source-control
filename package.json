@@ -3,7 +3,11 @@
   "displayName": "Git Change Stats",
   "description": "Shows changed files, added and deleted lines, and branches for every Git repository in a VS Code workspace.",
   "version": "0.1.0",
-  "publisher": "local",
+  "publisher": "wrick17",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wrick17/git-change-stats.git"
+  },
   "license": "UNLICENSED",
   "private": true,
   "engines": {

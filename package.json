@@ -1,8 +1,8 @@
 {
   "name": "git-change-stats",
-  "displayName": "Git Change Stats",
-  "description": "Shows changed files, added and deleted lines, and branches for every Git repository in a VS Code workspace.",
-  "version": "0.1.0",
+  "displayName": "Better Source Control",
+  "description": "A clean multi-repository Git view with file stats, staging, branches, commits, stash, pull, and push.",
+  "version": "1.0.0",
   "publisher": "wrick17",
   "repository": {
     "type": "git",
@@ -11,25 +11,113 @@
   "license": "UNLICENSED",
   "private": true,
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.108.0"
   },
   "categories": [
     "SCM Providers"
   ],
   "main": "./extension.js",
+  "icon": "better-source-control.png",
   "contributes": {
+    "configuration": {
+      "title": "Better Source Control",
+      "properties": {
+        "gitChangeStats.provider": {
+          "type": "string",
+          "order": 1,
+          "enum": [
+            "codex",
+            "claude"
+          ],
+          "enumDescriptions": [
+            "Use the locally authenticated Codex CLI.",
+            "Use the locally authenticated Claude Code CLI."
+          ],
+          "default": "codex",
+          "description": "CLI used to generate commit messages."
+        },
+        "gitChangeStats.model": {
+          "type": "string",
+          "order": 2,
+          "default": "",
+          "description": "Model selected through Better Source Control: Configure Commit Messages. Empty uses the provider default."
+        },
+        "gitChangeStats.reasoningEffort": {
+          "type": "string",
+          "order": 3,
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "medium",
+          "description": "Reasoning effort used by the selected CLI."
+        },
+        "gitChangeStats.showNoVerifyButton": {
+          "type": "boolean",
+          "order": 10,
+          "default": false,
+          "description": "Show the per-repository No Verify button."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gitChangeStats",
+          "title": "Better Source Control",
+          "icon": "repos.svg"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "gitChangeStats.refresh",
-        "title": "Refresh Repository Change Stats",
+        "title": "Better Source Control: Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gitChangeStats.listView",
+        "title": "Better Source Control: View as List",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "gitChangeStats.treeView",
+        "title": "Better Source Control: View as Tree",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "gitChangeStats.expandAll",
+        "title": "Better Source Control: Expand All",
+        "icon": "$(expand-all)"
+      },
+      {
+        "command": "gitChangeStats.collapseAll",
+        "title": "Better Source Control: Collapse All",
+        "icon": "$(collapse-all)"
+      },
+      {
+        "command": "gitChangeStats.configureAI",
+        "title": "Better Source Control: Configure Commit Messages",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "gitChangeStats.openSettings",
+        "title": "Better Source Control: Settings",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "gitChangeStats.showOutput",
+        "title": "Better Source Control: Show Output",
+        "icon": "$(output)"
       }
     ],
     "views": {
-      "scm": [
+      "gitChangeStats": [
         {
           "id": "gitChangeStats.repositories",
-          "name": "Repository Change Stats",
+          "name": "Better Source Control",
+          "type": "webview",
           "visibility": "visible"
         }
       ]
@@ -37,22 +125,58 @@
     "viewsWelcome": [
       {
         "view": "gitChangeStats.repositories",
-        "contents": "The built-in Git extension must be enabled to show repository change stats.",
+        "contents": "The built-in Git extension must be enabled to show repositories.",
         "when": "!gitChangeStats.available"
       }
     ],
     "menus": {
       "view/title": [
         {
+          "command": "gitChangeStats.listView",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available && gitChangeStats.viewMode == tree",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitChangeStats.treeView",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available && gitChangeStats.viewMode == list",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitChangeStats.expandAll",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gitChangeStats.collapseAll",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available",
+          "group": "navigation@3"
+        },
+        {
           "command": "gitChangeStats.refresh",
           "when": "view == gitChangeStats.repositories && gitChangeStats.available",
-          "group": "navigation"
+          "group": "navigation@4"
+        },
+        {
+          "command": "gitChangeStats.configureAI",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available",
+          "group": "navigation@5"
+        },
+        {
+          "command": "gitChangeStats.openSettings",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available",
+          "group": "navigation@6"
+        },
+        {
+          "command": "gitChangeStats.showOutput",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available",
+          "group": "navigation@7"
         }
       ]
     }
   },
   "scripts": {
     "test": "node --test",
-    "package": "bunx @vscode/vsce package"
+    "package": "bunx @vscode/vsce package --out ${TMPDIR:-/tmp}/git-change-stats.vsix",
+    "install:local": "bun run package && code --install-extension ${TMPDIR:-/tmp}/git-change-stats.vsix --force && rm -f ${TMPDIR:-/tmp}/git-change-stats.vsix"
   }
 }

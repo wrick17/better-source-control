@@ -1,21 +1,27 @@
-# Git Change Stats
+# Better Source Control
 
-Shows one compact row per Git repository in a multi-root VS Code workspace:
+A dedicated VS Code view for every Git repository in a workspace. It includes:
 
-```text
-adminshell  (8* : +271 -32)  dev*
-ai          (2* : +21 -3)    master*
-```
+- Repository-level Pull, Push, Stash, and Pop Stash actions
+- Staged and working-tree groups with per-file stage/unstage actions
+- Modified, added, deleted, renamed, and copied badges
+- Per-file and per-repository added/deleted line counts
+- Global list/tree layout toggle
+- File diffs, branch switching, and staged commits
+- Automatic staging when committing with no staged changes
+- Commit-message generation through a locally authenticated Codex or Claude Code CLI
+- An integrated, repository-specific commit graph with merge lanes, refs, commit details, diffs, filtering, and local history actions
 
-Open **Source Control** and expand **Repository Change Stats**. The view refreshes when VS Code's built-in Git extension detects a status change; the refresh button forces an immediate update.
+Open **Better Source Control** from the Activity Bar. Each repository row has its own Git actions; select the row to reveal its commit box, staged changes, and working-tree changes. Select a branch name to switch branches and a file to open its diff.
 
-Tracked line totals come from VS Code's Git API. Untracked text files count as additions; untracked binary files count only toward changed files.
+The built-in Git extension must remain enabled because Better Source Control uses its official repository API. VS Code does not let extensions hide the built-in Source Control container, but you can right-click the Activity Bar and hide **Source Control** after installing this replacement view.
+
+Use **Better Source Control: Configure Commit Messages** for provider-filtered model and reasoning pickers. The Settings gear opens the extension's full Settings page; an empty model uses the selected CLI's default.
 
 ## Install locally
 
 ```sh
-bun run package
-code --install-extension git-change-stats-0.1.0.vsix
+bun run install:local
 ```
 
 Reload VS Code after installation.

@@ -29,7 +29,7 @@ const EFFORTS = {
 };
 
 async function generateCommitMessage(repository) {
-  const configuration = vscode.workspace.getConfiguration('gitChangeStats.ai');
+  const configuration = vscode.workspace.getConfiguration('gitChangeStats');
   const provider = configuration.get('provider', 'codex');
   const model = normalizeModel(provider, configuration.get('model', ''));
   const effort = normalizeEffort(provider, model, configuration.get('reasoningEffort', 'medium'));
@@ -81,12 +81,12 @@ function normalizeEffort(provider, model, effort) {
 }
 
 async function configureAI() {
-  const configuration = vscode.workspace.getConfiguration('gitChangeStats.ai');
+  const configuration = vscode.workspace.getConfiguration('gitChangeStats');
   const currentProvider = configuration.get('provider', 'codex');
   const provider = await vscode.window.showQuickPick([
     { label: 'Codex', value: 'codex', picked: currentProvider === 'codex' },
     { label: 'Claude Code', value: 'claude', picked: currentProvider === 'claude' },
-  ], { title: 'Better Source Control: AI Provider' });
+  ], { title: 'Better Source Control: Provider' });
   if (!provider) return;
 
   const currentModel = normalizeModel(provider.value, configuration.get('model', ''));
@@ -97,7 +97,7 @@ async function configureAI() {
       value,
       picked: value === currentModel,
     })),
-    { title: 'Better Source Control: AI Model' },
+    { title: 'Better Source Control: Model' },
   );
   if (!model) return;
 
@@ -122,7 +122,23 @@ async function configureAI() {
 }
 
 async function normalizeConfiguration() {
-  const configuration = vscode.workspace.getConfiguration('gitChangeStats.ai');
+  const configuration = vscode.workspace.getConfiguration('gitChangeStats');
+  const legacy = vscode.workspace.getConfiguration('gitChangeStats.ai');
+  for (const key of ['provider', 'model', 'reasoningEffort']) {
+    const current = configuration.inspect(key);
+    if ([current?.workspaceFolderValue, current?.workspaceValue, current?.globalValue]
+      .some((value) => value !== undefined)) continue;
+    const previous = legacy.inspect(key);
+    const entry = [
+      [previous?.workspaceFolderValue, vscode.ConfigurationTarget.WorkspaceFolder],
+      [previous?.workspaceValue, vscode.ConfigurationTarget.Workspace],
+      [previous?.globalValue, vscode.ConfigurationTarget.Global],
+    ].find(([value]) => value !== undefined);
+    if (entry) {
+      await configuration.update(key, entry[0], entry[1]);
+      await legacy.update(key, undefined, entry[1]);
+    }
+  }
   const effort = configuration.get('reasoningEffort', 'medium');
   if (['low', 'medium', 'high'].includes(effort)) return;
   const inspected = configuration.inspect('reasoningEffort');
@@ -182,7 +198,7 @@ function cliArgs(provider, model, effort) {
       ],
     };
   }
-  if (provider !== 'codex') throw new Error(`Unknown AI provider: ${provider}`);
+  if (provider !== 'codex') throw new Error(`Unknown provider: ${provider}`);
   if (!['low', 'medium', 'high'].includes(effort)) {
     throw new Error(`Codex does not support ${effort} reasoning effort.`);
   }
@@ -213,7 +229,7 @@ function runCli(provider, model, effort, prompt, cwd, token) {
     let stderr = '';
     let settled = false;
     let killTimer;
-    const timeout = setTimeout(() => stop(new Error('The AI CLI timed out.')), TIMEOUT_MS);
+    const timeout = setTimeout(() => stop(new Error('The selected CLI timed out.')), TIMEOUT_MS);
     const cancellation = token.onCancellationRequested(() => stop(new Error('Generation cancelled.')));
 
     function finish(callback, value) {
@@ -241,7 +257,7 @@ function runCli(provider, model, effort, prompt, cwd, token) {
     ));
     child.stdout.on('data', (chunk) => {
       stdout += chunk;
-      if (stdout.length > MAX_OUTPUT) stop(new Error('The AI CLI returned too much output.'));
+      if (stdout.length > MAX_OUTPUT) stop(new Error('The selected CLI returned too much output.'));
     });
     child.stderr.on('data', (chunk) => {
       if (stderr.length < MAX_OUTPUT) stderr += chunk;
@@ -265,7 +281,7 @@ function cleanOutput(output) {
     .find((line) => line.trim())
     ?.trim()
     .replace(/^["'`](.*)["'`]$/, '$1');
-  if (!value) throw new Error('The AI CLI returned an empty message.');
+  if (!value) throw new Error('The selected CLI returned an empty message.');
   return value.slice(0, 500);
 }
 

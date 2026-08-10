@@ -1,0 +1,54 @@
+{
+  "name": "git-change-stats",
+  "displayName": "Git Change Stats",
+  "description": "Shows changed files, added and deleted lines, and branches for every Git repository in a VS Code workspace.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "gitChangeStats.refresh",
+        "title": "Refresh Repository Change Stats",
+        "icon": "$(refresh)"
+      }
+    ],
+    "views": {
+      "scm": [
+        {
+          "id": "gitChangeStats.repositories",
+          "name": "Repository Change Stats",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "gitChangeStats.repositories",
+        "contents": "The built-in Git extension must be enabled to show repository change stats.",
+        "when": "!gitChangeStats.available"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "gitChangeStats.refresh",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test",
+    "package": "bunx @vscode/vsce package"
+  }
+}

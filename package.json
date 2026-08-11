@@ -2,7 +2,7 @@
   "name": "git-change-stats",
   "displayName": "Better Source Control",
   "description": "A clean multi-repository Git view with file stats, staging, branches, commits, stash, pull, and push.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "wrick17",
   "repository": {
     "type": "git",

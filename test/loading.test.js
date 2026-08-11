@@ -5,16 +5,26 @@ const Module = require('node:module');
 const test = require('node:test');
 
 const load = Module._load;
+const executedCommands = [];
+let mergeEditor = false;
 let fullRefName;
 let RepositoryViewProvider;
 let html;
 let git;
+let openDiff;
 try {
   Module._load = (request, parent, isMain) =>
     request === 'vscode'
-      ? { workspace: { getConfiguration: () => ({ get: (_, fallback) => fallback }) } }
+      ? {
+          commands: { executeCommand: async (...args) => executedCommands.push(args) },
+          workspace: { getConfiguration: (section) => ({
+            get: (key, fallback) => section === 'git' && key === 'mergeEditor'
+              ? mergeEditor
+              : fallback,
+          }) },
+        }
       : load(request, parent, isMain);
-  ({ fullRefName, html, RepositoryViewProvider } = require('../extension'));
+  ({ fullRefName, html, openDiff, RepositoryViewProvider } = require('../extension'));
   git = require('../git-operations');
 } finally {
   Module._load = load;
@@ -63,7 +73,40 @@ test('generates valid webview JavaScript', () => {
   assert.doesNotThrow(() => new Function(script));
   assert.doesNotMatch(script, /\.title\s*=/);
   assert.match(markup, /\.custom-tooltip \{/);
+  assert.match(markup, /\.file-name \{ flex: none; \}/);
+  assert.match(markup, /directory\.dataset\.tooltip = (node|file)\.directory/);
+  assert.match(markup, /Resolve all conflicts with AI/);
+  assert.match(markup, /type: 'resolveConflicts'/);
+  assert.match(markup, /\? 'Conflicted'/);
+  assert.match(markup, /repository\.hasConflicts \? '!' : ''/);
+  assert.match(markup, /icon\(repository\.operation, 'icon repo-operation'/);
+  assert.match(markup, /expanded && repository\.expandable/);
+  assert.match(markup, /section\.inert = Boolean\(progressLabel\)/);
+  assert.match(markup, /section\.setAttribute\('aria-busy'/);
   assert.match(markup, /\.graph-date \{ min-width: max-content;/);
+});
+
+test('exposes separate AI controls with a shared provider', () => {
+  const properties = require('../package.json').contributes.configuration.properties;
+  assert.ok(properties['gitChangeStats.provider']);
+  assert.ok(properties['gitChangeStats.model']);
+  assert.ok(properties['gitChangeStats.reasoningEffort']);
+  assert.ok(properties['gitChangeStats.conflictModel']);
+  assert.ok(properties['gitChangeStats.conflictReasoningEffort']);
+});
+
+test('opens content conflicts through the native Git editor route', async () => {
+  const uri = { fsPath: '/repo/conflict.js' };
+  const repository = { rootUri: { fsPath: '/repo' } };
+  executedCommands.length = 0;
+
+  await openDiff({}, repository, 'unstaged', { status: 18, uri });
+  assert.deepEqual(executedCommands.pop(), ['vscode.open', uri, { override: false }]);
+
+  mergeEditor = true;
+  await openDiff({}, repository, 'unstaged', { status: 18, uri });
+  assert.deepEqual(executedCommands.pop(), ['git.openMergeEditor', uri]);
+  mergeEditor = false;
 });
 
 test('shows one repository loader and suppresses duplicate async actions', async () => {
@@ -86,6 +129,46 @@ test('shows one repository loader and suppresses duplicate async actions', async
 
   assert.equal(calls, 1);
   assert.deepEqual(posts.map(({ busy }) => busy), [true, false]);
+});
+
+test('blocks merge and rebase continuation only while conflicts remain', async () => {
+  const change = { uri: { fsPath: '/repo/conflict.js', toString: () => 'file:///repo/conflict.js' } };
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    inputBox: { value: '' },
+    state: {
+      HEAD: { name: 'feature' },
+      indexChanges: [change],
+      mergeChanges: [change],
+      untrackedChanges: [],
+      workingTreeChanges: [],
+    },
+  };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { git: { path: '/git' } },
+    expanded: new Set(),
+    stats: new Map(),
+    viewMode: 'list',
+    fileData: async () => [],
+  });
+  const operationState = git.operationState;
+  git.operationState = async () => 'rebase';
+  try {
+    const conflicted = await provider.repositoryData(repository);
+    assert.equal(conflicted.operation, 'rebase');
+    assert.equal(conflicted.hasConflicts, true);
+    assert.equal(conflicted.operationBlocked, true);
+    repository.state.mergeChanges = [];
+    repository.state.indexChanges = [];
+    const resolved = await provider.repositoryData(repository);
+    assert.equal(resolved.files, 0);
+    assert.equal(resolved.operation, 'rebase');
+    assert.equal(resolved.expandable, true);
+    assert.equal(resolved.hasConflicts, false);
+    assert.equal(resolved.operationBlocked, false);
+  } finally {
+    git.operationState = operationState;
+  }
 });
 
 test('collapses and re-expands the graph without discarding its repository', async () => {

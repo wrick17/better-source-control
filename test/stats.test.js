@@ -31,6 +31,7 @@ test('maps Git statuses and builds a sorted file tree', () => {
   assert.equal(statusBadge(1), 'A');
   assert.equal(statusBadge(6), 'D');
   assert.equal(statusBadge(5), 'M');
+  assert.equal(statusBadge(18), '!');
 
   const files = [
     { type: 'file', name: 'z.js', relativePath: 'src/z.js' },

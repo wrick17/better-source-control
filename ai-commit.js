@@ -1,16 +1,18 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
+const { readFile } = require('node:fs/promises');
 const path = require('node:path');
 const vscode = require('vscode');
 
 const MAX_INPUT = 500_000;
 const MAX_OUTPUT = 64_000;
 const TIMEOUT_MS = 120_000;
+const RESOLVE_TIMEOUT_MS = 600_000;
 const MODELS = {
   codex: [
     ['', 'Provider default'],
-    ['gpt-5.6', 'GPT-5.6 Sol'],
+    ['gpt-5.6-sol', 'GPT-5.6 Sol'],
     ['gpt-5.6-terra', 'GPT-5.6 Terra'],
     ['gpt-5.6-luna', 'GPT-5.6 Luna'],
     ['gpt-5.5', 'GPT-5.5'],
@@ -30,9 +32,7 @@ const EFFORTS = {
 
 async function generateCommitMessage(repository) {
   const configuration = vscode.workspace.getConfiguration('gitChangeStats');
-  const provider = configuration.get('provider', 'codex');
-  const model = normalizeModel(provider, configuration.get('model', ''));
-  const effort = normalizeEffort(provider, model, configuration.get('reasoningEffort', 'medium'));
+  const { provider, model, effort } = aiSelection(configuration);
   let prompt;
   try {
     prompt = await buildPrompt(repository);
@@ -63,6 +63,76 @@ async function generateCommitMessage(repository) {
   );
 }
 
+async function resolveConflicts(repository) {
+  const conflicts = [...new Map(repository.state.mergeChanges.map((change) => [
+    change.uri.toString(),
+    change,
+  ])).values()];
+  const files = conflicts.map((change) => path.relative(
+    repository.rootUri.fsPath,
+    change.uri.fsPath,
+  ));
+  if (!files.length) return true;
+
+  const configuration = vscode.workspace.getConfiguration('gitChangeStats');
+  const { provider, model, effort } = aiSelection(configuration, true);
+  const prompt = [
+    'Resolve every Git conflict in this repository.',
+    'Read and follow any applicable AGENTS.md or CLAUDE.md instructions.',
+    'Inspect the base, current, and incoming changes and preserve both sides\' intended behavior.',
+    'Remove all conflict markers and finish any required file deletions. Do not stage files; Better Source Control will stage the resolved conflict paths after you finish.',
+    'Do not commit, continue, skip, or abort the merge or rebase. Do not modify unrelated files.',
+    `Conflicted paths:\n${files.map((file) => `- ${file}`).join('\n')}`,
+  ].join('\n\n');
+
+  return vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `Resolving conflicts with ${provider === 'claude' ? 'Claude Code' : 'Codex'}`,
+      cancellable: true,
+    },
+    async (_, token) => {
+      try {
+        await runCli(provider, model, effort, prompt, repository.rootUri.fsPath, token, {
+          writable: true,
+          timeoutMs: RESOLVE_TIMEOUT_MS,
+        });
+        const resolved = [];
+        for (const change of conflicts) {
+          try {
+            if (!hasConflictMarkers(await readFile(change.uri.fsPath))) resolved.push(change.uri.fsPath);
+          } catch (error) {
+            if (error?.code === 'ENOENT') resolved.push(change.uri.fsPath);
+            else throw error;
+          }
+        }
+        if (resolved.length) await repository.add(resolved);
+        await repository.status();
+        const remaining = repository.state.mergeChanges.length;
+        if (remaining) {
+          await vscode.window.showWarningMessage(
+            `AI resolved some conflicts, but ${remaining} ${remaining === 1 ? 'file still has' : 'files still have'} conflicts.`,
+          );
+        }
+        return remaining === 0;
+      } catch (error) {
+        await repository.status().catch(() => {});
+        if (!token.isCancellationRequested) {
+          await vscode.window.showErrorMessage(
+            `Conflict resolution failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        return false;
+      }
+    },
+  );
+}
+
+function hasConflictMarkers(bytes) {
+  if (bytes.includes(0)) return false;
+  return /^<<<<<<<(?: .*)?\r?\n[\s\S]*?^=======\r?\n[\s\S]*?^>>>>>>>(?: .*)?$/m.test(bytes.toString());
+}
+
 function modelOptions(provider) {
   return MODELS[provider] ?? MODELS.codex;
 }
@@ -80,45 +150,71 @@ function normalizeEffort(provider, model, effort) {
   return effortOptions(provider, model).includes(effort) ? effort : 'medium';
 }
 
+function aiSelection(configuration, conflict = false) {
+  const provider = configuration.get('provider', 'codex');
+  const model = normalizeModel(provider, configuration.get(conflict ? 'conflictModel' : 'model', ''));
+  const effort = normalizeEffort(
+    provider,
+    model,
+    configuration.get(conflict ? 'conflictReasoningEffort' : 'reasoningEffort', 'medium'),
+  );
+  return { provider, model, effort };
+}
+
 async function configureAI() {
   const configuration = vscode.workspace.getConfiguration('gitChangeStats');
-  const currentProvider = configuration.get('provider', 'codex');
-  const provider = await vscode.window.showQuickPick([
-    { label: 'Codex', value: 'codex', picked: currentProvider === 'codex' },
-    { label: 'Claude Code', value: 'claude', picked: currentProvider === 'claude' },
-  ], { title: 'Better Source Control: Provider' });
-  if (!provider) return;
+  const control = await vscode.window.showQuickPick([
+    { label: 'Provider', description: 'Shared by both AI actions', value: 'provider' },
+    { label: 'Commit messages', description: 'Model and reasoning effort', value: 'commit' },
+    { label: 'Conflict resolver', description: 'Model and reasoning effort', value: 'conflict' },
+  ], { title: 'Better Source Control: Configure AI' });
+  if (!control) return;
 
-  const currentModel = normalizeModel(provider.value, configuration.get('model', ''));
+  const currentProvider = configuration.get('provider', 'codex');
+  if (control.value === 'provider') {
+    const provider = await vscode.window.showQuickPick([
+      { label: 'Codex', value: 'codex', picked: currentProvider === 'codex' },
+      { label: 'Claude Code', value: 'claude', picked: currentProvider === 'claude' },
+    ], { title: 'Better Source Control: Shared Provider' });
+    if (provider) {
+      await configuration.update('provider', provider.value, vscode.ConfigurationTarget.Global);
+    }
+    return;
+  }
+
+  const conflict = control.value === 'conflict';
+  const modelKey = conflict ? 'conflictModel' : 'model';
+  const effortKey = conflict ? 'conflictReasoningEffort' : 'reasoningEffort';
+  const title = conflict ? 'Conflict Resolver' : 'Commit Messages';
+  const currentModel = normalizeModel(currentProvider, configuration.get(modelKey, ''));
   const model = await vscode.window.showQuickPick(
-    modelOptions(provider.value).map(([value, label]) => ({
+    modelOptions(currentProvider).map(([value, label]) => ({
       label,
       description: value || 'default',
       value,
       picked: value === currentModel,
     })),
-    { title: 'Better Source Control: Model' },
+    { title: `Better Source Control: ${title} Model` },
   );
   if (!model) return;
 
   const currentEffort = normalizeEffort(
-    provider.value,
+    currentProvider,
     model.value,
-    configuration.get('reasoningEffort', 'medium'),
+    configuration.get(effortKey, 'medium'),
   );
   const effort = await vscode.window.showQuickPick(
-    effortOptions(provider.value, model.value).map((value) => ({
+    effortOptions(currentProvider, model.value).map((value) => ({
       label: value,
       value,
       picked: value === currentEffort,
     })),
-    { title: 'Better Source Control: Reasoning Effort' },
+    { title: `Better Source Control: ${title} Reasoning Effort` },
   );
   if (!effort) return;
 
-  await configuration.update('provider', provider.value, vscode.ConfigurationTarget.Global);
-  await configuration.update('model', model.value, vscode.ConfigurationTarget.Global);
-  await configuration.update('reasoningEffort', effort.value, vscode.ConfigurationTarget.Global);
+  await configuration.update(modelKey, model.value, vscode.ConfigurationTarget.Global);
+  await configuration.update(effortKey, effort.value, vscode.ConfigurationTarget.Global);
 }
 
 async function normalizeConfiguration() {
@@ -139,15 +235,16 @@ async function normalizeConfiguration() {
       await legacy.update(key, undefined, entry[1]);
     }
   }
-  const effort = configuration.get('reasoningEffort', 'medium');
-  if (['low', 'medium', 'high'].includes(effort)) return;
-  const inspected = configuration.inspect('reasoningEffort');
-  const target = inspected?.workspaceFolderValue !== undefined
-    ? vscode.ConfigurationTarget.WorkspaceFolder
-    : inspected?.workspaceValue !== undefined
-      ? vscode.ConfigurationTarget.Workspace
-      : vscode.ConfigurationTarget.Global;
-  await configuration.update('reasoningEffort', 'medium', target);
+  for (const key of ['reasoningEffort', 'conflictReasoningEffort']) {
+    if (['low', 'medium', 'high'].includes(configuration.get(key, 'medium'))) continue;
+    const inspected = configuration.inspect(key);
+    const target = inspected?.workspaceFolderValue !== undefined
+      ? vscode.ConfigurationTarget.WorkspaceFolder
+      : inspected?.workspaceValue !== undefined
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await configuration.update(key, 'medium', target);
+  }
 }
 
 async function buildPrompt(repository) {
@@ -178,7 +275,7 @@ async function buildPrompt(repository) {
   ].join('\n\n');
 }
 
-function cliArgs(provider, model, effort) {
+function cliArgs(provider, model, effort, writable = false) {
   if (provider === 'claude') {
     if (!['low', 'medium', 'high'].includes(effort)) {
       throw new Error(`Claude Code does not support ${effort} effort.`);
@@ -191,7 +288,13 @@ function cliArgs(provider, model, effort) {
         '--safe-mode',
         '--no-session-persistence',
         '--no-chrome',
-        '--tools', '',
+        ...(writable
+          ? [
+              '--permission-mode', 'dontAsk',
+              '--tools', 'Read,Edit,Write,Glob,Grep,Bash',
+              '--allowedTools', 'Read,Edit,Write,Glob,Grep,Bash(git *)',
+            ]
+          : ['--tools', '']),
         '--disallowedTools', 'mcp__*',
         ...(model ? ['--model', model] : []),
         '--effort', effort,
@@ -205,9 +308,10 @@ function cliArgs(provider, model, effort) {
   return {
     command: 'codex',
     args: [
+      ...(writable ? ['--ask-for-approval', 'never'] : []),
       'exec',
       '--ephemeral',
-      '--sandbox', 'read-only',
+      '--sandbox', writable ? 'workspace-write' : 'read-only',
       '--color', 'never',
       ...(model ? ['--model', model] : []),
       '-c', `model_reasoning_effort="${effort}"`,
@@ -216,8 +320,11 @@ function cliArgs(provider, model, effort) {
   };
 }
 
-function runCli(provider, model, effort, prompt, cwd, token) {
-  const { command, args } = cliArgs(provider, model, effort);
+function runCli(provider, model, effort, prompt, cwd, token, {
+  writable = false,
+  timeoutMs = TIMEOUT_MS,
+} = {}) {
+  const { command, args } = cliArgs(provider, model, effort, writable);
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -229,7 +336,7 @@ function runCli(provider, model, effort, prompt, cwd, token) {
     let stderr = '';
     let settled = false;
     let killTimer;
-    const timeout = setTimeout(() => stop(new Error('The selected CLI timed out.')), TIMEOUT_MS);
+    const timeout = setTimeout(() => stop(new Error('The selected CLI timed out.')), timeoutMs);
     const cancellation = token.onCancellationRequested(() => stop(new Error('Generation cancelled.')));
 
     function finish(callback, value) {
@@ -286,13 +393,16 @@ function cleanOutput(output) {
 }
 
 module.exports = {
+  aiSelection,
   cleanOutput,
   cliArgs,
   configureAI,
   effortOptions,
   generateCommitMessage,
+  hasConflictMarkers,
   modelOptions,
   normalizeEffort,
   normalizeConfiguration,
   normalizeModel,
+  resolveConflicts,
 };

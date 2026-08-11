@@ -17,7 +17,7 @@ const { layoutGraph, markRollbackTargets } = require('./graph');
 const VIEW_ID = 'gitChangeStats.repositories';
 const GRAPH_PAGE_SIZE = 50;
 const BUSY_MESSAGE_TYPES = new Set([
-  'operation', 'commit', 'continueOperation', 'abortOperation', 'branch',
+  'operation', 'commit', 'continueOperation', 'resolveConflicts', 'abortOperation', 'branch',
   'stage', 'unstage', 'stageAll', 'unstageAll', 'discard', 'discardAll',
   'graphCheckout', 'graphCreateBranch', 'graphCreateTag', 'graphCherryPick',
   'graphAmendMessage', 'graphRollback',
@@ -26,6 +26,7 @@ const BUSY_MESSAGE_TYPES = new Set([
 function busyLabel(message) {
   if (message.type === 'commit') return 'Committing changes';
   if (message.type === 'continueOperation') return `Continuing ${message.operation}`;
+  if (message.type === 'resolveConflicts') return 'Resolving conflicts with AI';
   if (message.type === 'abortOperation') return `Aborting ${message.operation}`;
   if (message.type === 'operation') {
     return {
@@ -778,6 +779,11 @@ class RepositoryViewProvider {
     };
     if (message.type === 'continueOperation' && ['merge', 'rebase'].includes(message.operation)) {
       await git.continueOperation(repository, message.operation, message.message, operationOptions);
+    } else if (message.type === 'resolveConflicts'
+      && ['merge', 'rebase'].includes(message.operation)
+      && repository.state.mergeChanges.length) {
+      await ai.resolveConflicts(repository);
+      await this.refresh();
     } else if (message.type === 'abortOperation' && ['merge', 'rebase'].includes(message.operation)) {
       await git.abortOperation(repository, message.operation, operationOptions);
     } else if (message.type === 'operation' && ['pullMerge', 'pullRebase', 'pullFrom', 'push', 'resetToOrigin', 'stash', 'popStashSelected', 'popStash'].includes(message.operation)) {
@@ -856,9 +862,7 @@ class RepositoryViewProvider {
     const stats = this.stats.get(repository.rootUri.fsPath);
     const isExpanded = this.expanded.has(repository.rootUri.fsPath);
     const files = changedFileCount(repository.state);
-    const operation = isExpanded && files
-      ? await git.operationState(repository, { gitPath: this.api.git.path })
-      : undefined;
+    const operation = await git.operationState(repository, { gitPath: this.api.git?.path });
     const stagedFiles = isExpanded
       ? await this.fileData(repository, 'staged', repository.state.indexChanges)
       : [];
@@ -879,6 +883,8 @@ class RepositoryViewProvider {
       ahead: repository.state.HEAD?.ahead ?? 0,
       behind: repository.state.HEAD?.behind ?? 0,
       files,
+      expandable: Boolean(files || operation),
+      hasConflicts: repository.state.mergeChanges.length > 0,
       statsLabel: stats ? formatChangeStats(files, stats.insertions, stats.deletions) : files ? String(files) : '',
       statsReady: Boolean(stats),
       insertions: stats?.insertions ?? 0,
@@ -887,7 +893,7 @@ class RepositoryViewProvider {
       showNoVerifyButton,
       noVerify: showNoVerifyButton && this.noVerify.has(repository.rootUri.fsPath),
       operation,
-      operationBlocked: operation === 'merge' && repository.state.mergeChanges.length > 0,
+      operationBlocked: Boolean(operation && repository.state.mergeChanges.length),
       operationMessage: operation === 'rebase'
         ? repository.state.rebaseCommit?.message ?? ''
         : operation === 'merge' ? repository.inputBox.value : '',
@@ -1000,6 +1006,14 @@ function emptyUri(uri) {
 }
 
 function openDiff(api, repository, kind, change) {
+  if (kind === 'unstaged' && [16, 18].includes(change.status)) {
+    const mergeEditor = vscode.workspace.getConfiguration('git', change.uri)
+      .get('mergeEditor', false);
+    return mergeEditor
+      ? vscode.commands.executeCommand('git.openMergeEditor', change.uri)
+      : vscode.commands.executeCommand('vscode.open', change.uri, { override: false });
+  }
+
   const badge = statusBadge(change.status);
   const originalUri = change.originalUri ?? change.uri;
   const renamedUri = change.renameUri ?? change.uri;
@@ -1053,6 +1067,7 @@ function html() {
     .clean-indicator { width: 12px; height: 12px; margin: 1px; color: var(--vscode-gitDecoration-addedResourceForeground); transform: translateY(1px); }
     .expanded .chevron { transform: rotate(90deg); }
     .repo-name { min-width: 40px; flex: 0 1 auto; margin-right: 4px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .repo-operation { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
     .repo-sync { display: flex; align-items: center; gap: 3px; flex: none; color: var(--vscode-descriptionForeground); font-size: 11px; font-variant-numeric: tabular-nums; }
     .sync-count { display: flex; align-items: center; gap: 1px; }
     .sync-count .icon { width: 11px; height: 11px; }
@@ -1101,8 +1116,9 @@ function html() {
     .badge-M { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
     .badge-R { color: var(--vscode-gitDecoration-renamedResourceForeground); }
     .badge-C { color: var(--vscode-gitDecoration-addedResourceForeground); }
-    .file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .file-dir { min-width: 0; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .badge-conflict { color: var(--vscode-gitDecoration-conflictingResourceForeground); }
+    .file-name { flex: none; }
+    .file-dir { min-width: 0; flex: 1; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .stats { display: flex; gap: 5px; margin-left: auto; flex: none; font-size: 11px; font-variant-numeric: tabular-nums; }
     .file-actions { display: none; margin-left: auto; }
     .file:hover .file-actions, .file:focus-within .file-actions { display: flex; }
@@ -1207,6 +1223,8 @@ function html() {
       target: [['circle', { cx: '12', cy: '12', r: '8' }], ['circle', { cx: '12', cy: '12', r: '3' }]],
       play: [['path', { d: 'm7 4 13 8-13 8z' }]],
       abort: [['circle', { cx: '12', cy: '12', r: '9' }], ['path', { d: 'm9 9 6 6' }], ['path', { d: 'm15 9-6 6' }]],
+      merge: [['circle', { cx: '18', cy: '18', r: '3' }], ['circle', { cx: '6', cy: '6', r: '3' }], ['path', { d: 'M6 21V9a9 9 0 0 0 9 9' }]],
+      rebase: [['circle', { cx: '5', cy: '6', r: '3' }], ['path', { d: 'M12 6h5a2 2 0 0 1 2 2v7' }], ['path', { d: 'm15 9-3-3 3-3' }], ['circle', { cx: '19', cy: '18', r: '3' }], ['path', { d: 'M12 18H7a2 2 0 0 1-2-2V9' }], ['path', { d: 'm9 15 3 3-3 3' }]],
     };
 
     window.addEventListener('message', ({ data }) => {
@@ -1373,7 +1391,7 @@ function html() {
     function renderRepository(repository) {
       const expanded = model.expanded.includes(repository.id);
       const progressLabel = busy.get(repository.id);
-      const section = el('section', 'repo' + (expanded ? ' expanded' : '') + (repository.files ? '' : ' clean'));
+      const section = el('section', 'repo' + (expanded ? ' expanded' : '') + (repository.expandable ? '' : ' clean'));
       const row = el('div', 'repo-row');
       row.draggable = true;
       row.addEventListener('dragstart', (event) => {
@@ -1404,7 +1422,7 @@ function html() {
         });
         clearDropState();
       });
-      if (repository.files) {
+      if (repository.expandable) {
         row.tabIndex = 0;
         row.setAttribute('role', 'button');
         row.setAttribute('aria-expanded', String(expanded));
@@ -1418,11 +1436,17 @@ function html() {
         });
       }
       row.append(
-        repository.files
+        repository.expandable
           ? icon('chevron', 'icon chevron', (expanded ? 'Collapse ' : 'Expand ') + repository.name)
           : icon('check', 'icon clean-indicator', repository.name + ' is clean'),
         el('span', 'repo-name', repository.name),
       );
+      if (repository.operation) {
+        const operationTitle = repository.operation === 'merge'
+          ? 'Merge in progress'
+          : 'Rebase in progress';
+        row.append(icon(repository.operation, 'icon repo-operation', operationTitle));
+      }
       if (repository.behind || repository.ahead) {
         const sync = el('span', 'repo-sync');
         if (repository.behind) {
@@ -1441,8 +1465,13 @@ function html() {
       const branch = button(repository.branch, 'Switch branch', () => post('branch', repository), 'branch');
       if (repository.files) {
         const stats = el('span', 'repo-stats');
-        stats.dataset.tooltip = repository.statsLabel;
-        stats.append(el('span', 'repo-file-count', String(repository.files)));
+        stats.dataset.tooltip = repository.statsLabel
+          + (repository.hasConflicts ? '\\nMerge conflicts present' : '');
+        stats.append(el(
+          'span',
+          'repo-file-count',
+          String(repository.files) + (repository.hasConflicts ? '!' : ''),
+        ));
         if (repository.statsReady) {
           stats.append(
             el('span', 'add', '+' + repository.insertions),
@@ -1547,10 +1576,9 @@ function html() {
       );
       row.append(meta, actions);
       section.append(row);
-      if (expanded && repository.files) section.append(renderDetails(repository));
-      if (progressLabel) {
-        section.querySelectorAll('button, textarea').forEach((node) => { node.disabled = true; });
-      }
+      if (expanded && repository.expandable) section.append(renderDetails(repository));
+      section.inert = Boolean(progressLabel);
+      section.setAttribute('aria-busy', String(Boolean(progressLabel)));
       return section;
     }
 
@@ -1577,25 +1605,34 @@ function html() {
       if (repository.operation === 'rebase') input.disabled = true;
       if (repository.operation) {
         const operationTitle = repository.operation[0].toUpperCase() + repository.operation.slice(1);
-        const resume = button(
-          progressLabel ? 'loader' : 'play',
-          progressLabel || (repository.operationBlocked
-            ? 'Resolve all conflicts before continuing merge'
-            : 'Continue ' + repository.operation),
-          () => vscode.postMessage({
-            type: 'continueOperation',
-            repositoryId: repository.id,
-            operation: repository.operation,
-            message: input.value,
-          }),
-          'commit-button',
-        );
+        const resume = repository.operationBlocked
+          ? button(
+              progressLabel ? 'loader' : 'sparkles',
+              progressLabel || 'Resolve all conflicts with AI',
+              () => vscode.postMessage({
+                type: 'resolveConflicts',
+                repositoryId: repository.id,
+                operation: repository.operation,
+              }),
+              'commit-button ai-button',
+            )
+          : button(
+              progressLabel ? 'loader' : 'play',
+              progressLabel || 'Continue ' + repository.operation,
+              () => vscode.postMessage({
+                type: 'continueOperation',
+                repositoryId: repository.id,
+                operation: repository.operation,
+                message: input.value,
+              }),
+              'commit-button',
+            );
         if (progressLabel) resume.querySelector('svg').classList.add('spinning');
-        resume.disabled = repository.operationBlocked
-          || repository.operation === 'merge' && !input.value.trim();
+        resume.disabled = !repository.operationBlocked
+          && repository.operation === 'merge' && !input.value.trim();
         input.addEventListener('input', () => {
-          resume.disabled = repository.operationBlocked
-            || repository.operation === 'merge' && !input.value.trim();
+          resume.disabled = !repository.operationBlocked
+            && repository.operation === 'merge' && !input.value.trim();
         });
         commit.append(
           input,
@@ -1711,10 +1748,17 @@ function html() {
       file.tabIndex = 0;
       file.addEventListener('click', () => filePost('diff', repository, kind, node));
       file.addEventListener('keydown', (event) => event.key === 'Enter' && filePost('diff', repository, kind, node));
-      const badge = el('span', 'badge badge-' + node.badge, node.badge);
-      badge.dataset.tooltip = ({ A: 'Added', D: 'Deleted', M: 'Modified', R: 'Renamed', C: 'Copied' })[node.badge];
+      const conflicted = node.badge === '!';
+      const badge = el('span', 'badge badge-' + node.badge + (conflicted ? ' badge-conflict' : ''), node.badge);
+      badge.dataset.tooltip = conflicted
+        ? 'Conflicted'
+        : ({ A: 'Added', D: 'Deleted', M: 'Modified', R: 'Renamed', C: 'Copied' })[node.badge];
       file.append(badge, el('span', 'file-name', node.name));
-      if (model.viewMode === 'list' && node.directory !== '.') file.append(el('span', 'file-dir', node.directory));
+      if (model.viewMode === 'list' && node.directory !== '.') {
+        const directory = el('span', 'file-dir', node.directory);
+        directory.dataset.tooltip = node.directory;
+        file.append(directory);
+      }
       const stats = el('span', 'stats');
       stats.append(el('span', 'add', '+' + node.insertions), el('span', 'del', '−' + node.deletions));
       const actions = el('span', 'file-actions');
@@ -2078,7 +2122,11 @@ function html() {
             el('span', 'badge badge-' + file.badge, file.badge),
             el('span', 'file-name', file.name),
           );
-          if (file.directory !== '.') row.append(el('span', 'file-dir', file.directory));
+          if (file.directory !== '.') {
+            const directory = el('span', 'file-dir', file.directory);
+            directory.dataset.tooltip = file.directory;
+            row.append(directory);
+          }
           const fileActions = el('span', 'file-actions');
           if (file.canOpen) {
             fileActions.append(button('file', 'Open file at this commit', () => graphFilePost('graphFileOpen', commit, file)));
@@ -2286,4 +2334,4 @@ async function activate(context) {
 
 function deactivate() {}
 
-module.exports = { activate, deactivate, fullRefName, html, RepositoryViewProvider };
+module.exports = { activate, deactivate, fullRefName, html, openDiff, RepositoryViewProvider };

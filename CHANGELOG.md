@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.2 — 2026-08-11
+
+### Added
+
+- Added **Resolve all conflicts with AI** for active merges and rebases, using the globally selected Codex or Claude Code model.
+
+### Changed
+
+- Replaced the blocked Continue action with AI conflict resolution, then restored Continue automatically after all resolved paths are staged.
+- Renamed the global AI command to **Configure AI**, with one shared provider and separate model and reasoning controls for commit-message generation and conflict resolution.
+- Added merge and rebase progress icons beside repository names, including collapsed repositories.
+
+### Fixed
+
+- Displayed conflicted files with a **!** status instead of **M**, leaving **C** for copied files.
+- Added **!** to repository file-count badges while merge conflicts remain.
+- Opened content conflicts through VS Code's native Git editor route, matching its filename, full-file view, and **Resolve in Merge Editor** action.
+- Blocked every repository-row interaction while a Git operation loader is active.
+- Kept repositories expandable during an active merge or rebase even after every file change is discarded, preserving Continue and Abort controls.
+- Kept filenames visible while truncating long directory paths with a full-path tooltip.
+
 ## 1.0.1 — 2026-08-11
 
 ### Added

@@ -16,7 +16,7 @@ Open **Better Source Control** from the Activity Bar. Each repository row has it
 
 The built-in Git extension must remain enabled because Better Source Control uses its official repository API. VS Code does not let extensions hide the built-in Source Control container, but you can right-click the Activity Bar and hide **Source Control** after installing this replacement view.
 
-Use **Better Source Control: Configure Commit Messages** for provider-filtered model and reasoning pickers. The Settings gear opens the extension's full Settings page; an empty model uses the selected CLI's default.
+Use **Better Source Control: Configure AI** for one global provider plus separate model and reasoning controls for commit messages and conflict resolution. An empty model uses the selected CLI's default.
 
 ## Install locally
 

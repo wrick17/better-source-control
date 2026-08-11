@@ -2,7 +2,7 @@
   "name": "git-change-stats",
   "displayName": "Better Source Control",
   "description": "A clean multi-repository Git view with file stats, staging, branches, commits, stash, pull, and push.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "wrick17",
   "repository": {
     "type": "git",
@@ -34,13 +34,13 @@
             "Use the locally authenticated Claude Code CLI."
           ],
           "default": "codex",
-          "description": "CLI used to generate commit messages."
+          "description": "CLI shared by commit-message generation and conflict resolution."
         },
         "gitChangeStats.model": {
           "type": "string",
           "order": 2,
           "default": "",
-          "description": "Model selected through Better Source Control: Configure Commit Messages. Empty uses the provider default."
+          "description": "Model used to generate commit messages. Empty uses the selected CLI's default."
         },
         "gitChangeStats.reasoningEffort": {
           "type": "string",
@@ -51,7 +51,24 @@
             "high"
           ],
           "default": "medium",
-          "description": "Reasoning effort used by the selected CLI."
+          "description": "Reasoning effort used to generate commit messages."
+        },
+        "gitChangeStats.conflictModel": {
+          "type": "string",
+          "order": 4,
+          "default": "",
+          "description": "Model used to resolve merge and rebase conflicts. Empty uses the selected CLI's default."
+        },
+        "gitChangeStats.conflictReasoningEffort": {
+          "type": "string",
+          "order": 5,
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "medium",
+          "description": "Reasoning effort used to resolve merge and rebase conflicts."
         },
         "gitChangeStats.showNoVerifyButton": {
           "type": "boolean",
@@ -98,7 +115,7 @@
       },
       {
         "command": "gitChangeStats.configureAI",
-        "title": "Better Source Control: Configure Commit Messages",
+        "title": "Better Source Control: Configure AI",
         "icon": "$(sparkle)"
       },
       {

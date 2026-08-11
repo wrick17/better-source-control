@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1 — 2026-08-11
+
+### Added
+
+- Added a guarded **Reset Branch to Origin** repository action that fetches the current branch and replaces its local commits and tracked changes with `origin/<branch>`.
+
+### Fixed
+
+- Closed repository and commit menus when focus moves outside the Better Source Control panel.
+- Made the expanded Commit Graph header collapse the graph when clicked while preserving its repository and toolbar actions.
+
 ## 1.0.0 — 2026-08-10
 
 ### Added

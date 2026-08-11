@@ -22,6 +22,7 @@ Module._load = function load(request, parent, isMain) {
       window: {
         withProgress: async (_, action) => action(),
         showErrorMessage: async () => {},
+        showInformationMessage: async () => {},
         showQuickPick: async (items) => items[0],
         showWarningMessage: async (...args) => args.at(-1),
       },
@@ -47,6 +48,7 @@ const {
   pullFrom,
   pullRebase,
   push,
+  resetToOrigin,
   rollback,
 } = require('../git-operations');
 Module._load = originalLoad;
@@ -151,6 +153,32 @@ test('opens VS Code\'s stash picker for pop stash', async () => {
   const repository = { rootUri: { fsPath: '/repo' } };
   assert.equal(await popStashSelected(repository), true);
   assert.deepEqual(vscodeCommandCalls, [['git.stashPop', repository.rootUri]]);
+});
+
+test('reset to origin fetches and hard-resets the current local branch after confirmation', async () => {
+  gitExecCalls.length = 0;
+  const calls = [];
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: {
+      HEAD: { name: 'feature' },
+      mergeChanges: [],
+      rebaseCommit: { hash: 'rebasing' },
+      remotes: [{ name: 'origin', fetchUrl: 'git@example/repo.git' }],
+    },
+    fetch: async (...args) => calls.push(['fetch', ...args]),
+    status: async () => calls.push(['status']),
+  };
+
+  assert.equal(await resetToOrigin(repository, { gitPath: '/git' }), false);
+  repository.state.rebaseCommit = undefined;
+  assert.equal(await resetToOrigin(repository, { gitPath: '/git' }), true);
+  assert.deepEqual(calls, [['fetch', 'origin', 'feature'], ['status']]);
+  assert.deepEqual(gitExecCalls.at(-1), [
+    '/git',
+    ['reset', '--hard', 'refs/remotes/origin/feature'],
+    { cwd: '/repo' },
+  ]);
 });
 
 test('continues and aborts the active merge or rebase', async () => {

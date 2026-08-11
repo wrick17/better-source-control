@@ -33,6 +33,7 @@ function busyLabel(message) {
       pullRebase: 'Pulling with rebase',
       pullFrom: 'Pulling from branch',
       push: 'Pushing changes',
+      resetToOrigin: 'Resetting branch to origin',
       stash: 'Stashing changes',
       popStash: 'Popping latest stash',
       popStashSelected: 'Popping stash',
@@ -779,7 +780,7 @@ class RepositoryViewProvider {
       await git.continueOperation(repository, message.operation, message.message, operationOptions);
     } else if (message.type === 'abortOperation' && ['merge', 'rebase'].includes(message.operation)) {
       await git.abortOperation(repository, message.operation, operationOptions);
-    } else if (message.type === 'operation' && ['pullMerge', 'pullRebase', 'pullFrom', 'push', 'stash', 'popStashSelected', 'popStash'].includes(message.operation)) {
+    } else if (message.type === 'operation' && ['pullMerge', 'pullRebase', 'pullFrom', 'push', 'resetToOrigin', 'stash', 'popStashSelected', 'popStash'].includes(message.operation)) {
       await git[message.operation](repository, operationOptions);
     } else if (message.type === 'commit') {
       if (await git.commit(repository, message.message, operationOptions)) {
@@ -1290,6 +1291,7 @@ function html() {
     document.addEventListener('pointerdown', hideTooltip);
     addEventListener('scroll', hideTooltip, true);
     addEventListener('resize', hideTooltip);
+    addEventListener('blur', () => document.querySelectorAll('.repo-menu:popover-open').forEach((menu) => menu.hidePopover()));
 
     function icon(name, className = 'icon', title) {
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1470,6 +1472,8 @@ function html() {
         menuItem('Pull and Rebase', () => execute('pullRebase')),
         menuItem('Pull from…', () => execute('pullFrom')),
         menuItem('Push', () => execute('push')),
+        menuSeparator(),
+        menuItem('Reset Branch to Origin', () => execute('resetToOrigin')),
         menuSeparator(),
         menuItem('Stash Changes', () => execute('stash')),
         menuItem('Pop Stash…', () => execute('popStashSelected')),
@@ -1787,6 +1791,9 @@ function html() {
       });
 
       const header = el('header', 'graph-header');
+      header.addEventListener('click', (event) => {
+        if (!event.target.closest('button')) graphPost('closeGraph');
+      });
       header.append(el('span', 'graph-title', 'Commit Graph'));
       const repository = el('button', 'graph-repo', '· ' + graph.repositoryName);
       repository.type = 'button';

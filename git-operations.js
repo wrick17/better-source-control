@@ -134,6 +134,41 @@ function push(repository, { noVerify = false, gitPath } = {}) {
     : repository.push());
 }
 
+async function resetToOrigin(repository, { gitPath } = {}) {
+  if (!repository) return;
+  const branch = repository.state.HEAD?.name;
+  if (!branch) {
+    await vscode.window.showInformationMessage('Check out a local branch before resetting to origin.');
+    return false;
+  }
+  if (!repository.state.remotes.some((remote) => remote.name === 'origin' && remote.fetchUrl)) {
+    await vscode.window.showInformationMessage('This repository has no origin fetch remote.');
+    return false;
+  }
+  if (repository.state.rebaseCommit || repository.state.mergeChanges.length) {
+    await vscode.window.showInformationMessage('Finish or abort the current merge or rebase before resetting to origin.');
+    return false;
+  }
+  const action = 'Reset Branch to Origin';
+  const confirmed = await vscode.window.showWarningMessage(
+    `Reset ${branch} to origin/${branch}?`,
+    {
+      modal: true,
+      detail: `This fetches origin, then permanently discards local commits and tracked changes not present on origin/${branch}. Untracked files may also be overwritten.`,
+    },
+    action,
+  );
+  if (confirmed !== action) return false;
+  if (repository.state.HEAD?.name !== branch) {
+    await vscode.window.showInformationMessage('The current branch changed before it could be reset.');
+    return false;
+  }
+  return run(repository, `Resetting ${branch} to origin`, async () => {
+    await repository.fetch('origin', branch);
+    await runGit(repository, gitPath, ['reset', '--hard', `refs/remotes/origin/${branch}`]);
+  });
+}
+
 function checkoutDetached(repository, ref) {
   return run(repository, 'Checking out commit', () => repository.checkout(ref));
 }
@@ -300,6 +335,7 @@ module.exports = {
   pullMerge,
   pullRebase,
   push,
+  resetToOrigin,
   rollback,
   stage,
   stageAll,

@@ -42,6 +42,7 @@ const {
   createTagFromCommit,
   discardAll,
   emptyTreeHash,
+  fetch,
   operationState,
   popStashSelected,
   pullMerge,
@@ -50,6 +51,7 @@ const {
   push,
   resetToOrigin,
   rollback,
+  setLog,
 } = require('../git-operations');
 Module._load = originalLoad;
 
@@ -130,6 +132,38 @@ test('pull and push use native APIs normally and shell-free no-verify fallbacks'
     ['/git', ['rebase', '--no-verify', '@{upstream}'], { cwd: '/repo' }],
     ['/git', ['push', '--no-verify'], { cwd: '/repo' }],
   ]);
+});
+
+test('fetch uses the native repository API', async () => {
+  const calls = [];
+  const logs = [];
+  setLog({ info: (message) => logs.push(message) });
+  try {
+    assert.equal(await fetch({
+      rootUri: { fsPath: '/workspace/repo' },
+      fetch: async () => calls.push('fetch'),
+    }), true);
+    assert.deepEqual(calls, ['fetch']);
+    assert.deepEqual(logs, ['[repo] > Git API repository.fetch()']);
+  } finally {
+    setLog(undefined);
+  }
+});
+
+test('logs native operation failures to the extension output', async () => {
+  const errors = [];
+  setLog({ error: (...args) => errors.push(args) });
+  try {
+    const repository = {
+      rootUri: { fsPath: '/workspace/repo' },
+      fetch: async () => { throw new Error('offline'); },
+    };
+    assert.equal(await fetch(repository), false);
+    assert.match(errors[0][0], /\[repo\] Fetching changes failed\./);
+    assert.match(errors[0][1].message, /offline/);
+  } finally {
+    setLog(undefined);
+  }
 });
 
 test('pull from preserves no-verify while using the selected remote branch', async () => {

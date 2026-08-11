@@ -17,6 +17,7 @@ try {
     request === 'vscode'
       ? {
           commands: { executeCommand: async (...args) => executedCommands.push(args) },
+          window: { showErrorMessage: async () => {} },
           workspace: { getConfiguration: (section) => ({
             get: (key, fallback) => section === 'git' && key === 'mergeEditor'
               ? mergeEditor
@@ -111,11 +112,16 @@ test('opens content conflicts through the native Git editor route', async () => 
 
 test('shows one repository loader and suppresses duplicate async actions', async () => {
   const posts = [];
+  const logs = [];
   let release;
   let calls = 0;
   const gate = new Promise((resolve) => { release = resolve; });
   const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
     busyRepositories: new Set(),
+    log: {
+      info: (message) => logs.push(message),
+      warn: (message) => logs.push(message),
+    },
     view: { webview: { postMessage: async (message) => posts.push(message) } },
     handleMessage: async () => { calls += 1; await gate; },
   });
@@ -129,6 +135,9 @@ test('shows one repository loader and suppresses duplicate async actions', async
 
   assert.equal(calls, 1);
   assert.deepEqual(posts.map(({ busy }) => busy), [true, false]);
+  assert.match(logs[0], /\[repo\] Committing changes started\./);
+  assert.match(logs[1], /ignored because another operation is running\./);
+  assert.match(logs[2], /\[repo\] Committing changes finished in \d+ ms\./);
 });
 
 test('blocks merge and rebase continuation only while conflicts remain', async () => {

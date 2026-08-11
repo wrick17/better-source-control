@@ -2,7 +2,7 @@
   "name": "git-change-stats",
   "displayName": "Better Source Control",
   "description": "A clean multi-repository Git view with file stats, staging, branches, commits, stash, pull, and push.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publisher": "wrick17",
   "repository": {
     "type": "git",
@@ -94,6 +94,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "gitChangeStats.fetchAll",
+        "title": "Better Source Control: Fetch All Repositories",
+        "icon": "$(cloud-download)"
+      },
+      {
         "command": "gitChangeStats.listView",
         "title": "Better Source Control: View as List",
         "icon": "$(list-flat)"
@@ -174,19 +179,24 @@
           "group": "navigation@4"
         },
         {
-          "command": "gitChangeStats.configureAI",
+          "command": "gitChangeStats.fetchAll",
           "when": "view == gitChangeStats.repositories && gitChangeStats.available",
           "group": "navigation@5"
         },
         {
-          "command": "gitChangeStats.openSettings",
+          "command": "gitChangeStats.configureAI",
           "when": "view == gitChangeStats.repositories && gitChangeStats.available",
           "group": "navigation@6"
         },
         {
-          "command": "gitChangeStats.showOutput",
+          "command": "gitChangeStats.openSettings",
           "when": "view == gitChangeStats.repositories && gitChangeStats.available",
           "group": "navigation@7"
+        },
+        {
+          "command": "gitChangeStats.showOutput",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available",
+          "group": "navigation@8"
         }
       ]
     }

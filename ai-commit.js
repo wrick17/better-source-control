@@ -29,6 +29,16 @@ const EFFORTS = {
   codex: ['low', 'medium', 'high'],
   claude: ['low', 'medium', 'high'],
 };
+let log;
+
+function setLog(value) {
+  log = value;
+}
+
+function logApi(repository, method, ...args) {
+  const values = args.map((value) => JSON.stringify(value)).join(', ');
+  log?.info(`[${path.basename(repository.rootUri.fsPath)}] > Git API repository.${method}(${values})`);
+}
 
 async function generateCommitMessage(repository) {
   const configuration = vscode.workspace.getConfiguration('gitChangeStats');
@@ -106,7 +116,11 @@ async function resolveConflicts(repository) {
             else throw error;
           }
         }
-        if (resolved.length) await repository.add(resolved);
+        if (resolved.length) {
+          logApi(repository, 'add', resolved);
+          await repository.add(resolved);
+        }
+        logApi(repository, 'status');
         await repository.status();
         const remaining = repository.state.mergeChanges.length;
         if (remaining) {
@@ -116,6 +130,7 @@ async function resolveConflicts(repository) {
         }
         return remaining === 0;
       } catch (error) {
+        logApi(repository, 'status');
         await repository.status().catch(() => {});
         if (!token.isCancellationRequested) {
           await vscode.window.showErrorMessage(
@@ -261,6 +276,7 @@ async function buildPrompt(repository) {
     change.uri.fsPath,
   )))];
   if (!files.length) throw new Error('No changes are available for a commit message.');
+  logApi(repository, 'diff', staged);
   const patch = await repository.diff(staged).catch(() => '');
   const context = `Files:\n${files.map((file) => `- ${file}`).join('\n')}\n\nPatch:\n${patch}`;
   const clipped = context.length > MAX_INPUT
@@ -325,6 +341,8 @@ function runCli(provider, model, effort, prompt, cwd, token, {
   timeoutMs = TIMEOUT_MS,
 } = {}) {
   const { command, args } = cliArgs(provider, model, effort, writable);
+  const invocation = [command, ...args].map((value) => JSON.stringify(value)).join(' ');
+  log?.info(`[${path.basename(cwd)}] > spawn ${invocation}`);
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -405,4 +423,5 @@ module.exports = {
   normalizeConfiguration,
   normalizeModel,
   resolveConflicts,
+  setLog,
 };

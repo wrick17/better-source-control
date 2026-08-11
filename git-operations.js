@@ -7,6 +7,31 @@ const { promisify } = require('node:util');
 const vscode = require('vscode');
 
 const execGit = promisify(execFile);
+let log;
+
+function setLog(value) {
+  log = value;
+}
+
+function logInvocation(repository, invocation) {
+  log?.info?.(`[${path.basename(repository.rootUri.fsPath)}] > ${invocation}`);
+}
+
+function callApi(repository, method, ...args) {
+  const values = args.map((value) => JSON.stringify(value)).join(', ');
+  logInvocation(repository, `Git API repository.${method}(${values})`);
+  return repository[method](...args);
+}
+
+function runVsCodeCommand(repository, command, ...args) {
+  logInvocation(repository, `VS Code command ${command}`);
+  return vscode.commands.executeCommand(command, ...args);
+}
+
+function exec(repository, gitPath, args, options = {}) {
+  logInvocation(repository, [gitPath, ...args].map((value) => JSON.stringify(value)).join(' '));
+  return execGit(gitPath, args, { cwd: repository.rootUri.fsPath, ...options });
+}
 
 async function run(repository, title, action) {
   if (!repository) return;
@@ -17,6 +42,7 @@ async function run(repository, title, action) {
     );
     return true;
   } catch (error) {
+    log?.error(`[${path.basename(repository.rootUri.fsPath)}] ${title} failed.`, error);
     await vscode.window.showErrorMessage(
       `${title} failed: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -25,14 +51,17 @@ async function run(repository, title, action) {
 }
 
 function pull(repository) {
-  return run(repository, 'Pulling changes', () => repository.pull());
+  return run(repository, 'Pulling changes', () => callApi(repository, 'pull'));
+}
+
+function fetch(repository) {
+  return run(repository, 'Fetching changes', () => callApi(repository, 'fetch'));
 }
 
 function pullFrom(repository, { noVerify = false, gitPath } = {}) {
   if (!noVerify) {
     return run(repository, 'Pulling from branch', () =>
-      vscode.commands.executeCommand('git.pullFrom', repository.rootUri),
-    );
+      runVsCodeCommand(repository, 'git.pullFrom', repository.rootUri));
   }
   return run(repository, 'Pulling from branch', async () => {
     const remotes = repository.state.remotes.filter((remote) => remote.fetchUrl);
@@ -42,14 +71,14 @@ function pullFrom(repository, { noVerify = false, gitPath } = {}) {
       { title: 'Pull from', placeHolder: 'Select a remote' },
     ).then((item) => item?.remote);
     if (!remote) return;
-    const refs = await repository.getRefs({ pattern: `refs/remotes/${remote.name}/` });
+    const refs = await callApi(repository, 'getRefs', { pattern: `refs/remotes/${remote.name}/` });
     const picked = await vscode.window.showQuickPick(
       refs.filter((ref) => ref.name).map((ref) => ({ label: ref.name, ref })),
       { title: `Pull from ${remote.name}`, placeHolder: 'Select a branch' },
     );
     if (!picked) return;
     const branch = picked.ref.name.slice(remote.name.length + 1);
-    await repository.fetch(remote.name, branch);
+    await callApi(repository, 'fetch', remote.name, branch);
     await runGit(repository, gitPath, ['merge', '--no-edit', '--no-verify', 'FETCH_HEAD']);
   });
 }
@@ -57,9 +86,9 @@ function pullFrom(repository, { noVerify = false, gitPath } = {}) {
 async function runGit(repository, gitPath, args, options = {}) {
   if (!gitPath) throw new Error('Git executable unavailable.');
   try {
-    await execGit(gitPath, args, { cwd: repository.rootUri.fsPath, ...options });
+    await exec(repository, gitPath, args, options);
   } finally {
-    await repository.status();
+    await callApi(repository, 'status');
   }
 }
 
@@ -68,9 +97,7 @@ async function operationState(repository, { gitPath } = {}) {
   if (repository.state.mergeChanges.length) return 'merge';
   if (!gitPath) return;
   try {
-    await execGit(gitPath, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], {
-      cwd: repository.rootUri.fsPath,
-    });
+    await exec(repository, gitPath, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
     return 'merge';
   } catch (error) {
     if (error?.code === 1) return;
@@ -88,12 +115,10 @@ async function continueOperation(repository, operation, message, options = {}) {
     const value = message?.trim();
     if (!value) return false;
     return run(repository, 'Continuing merge', () =>
-      repository.commit(value, { noVerify: options.noVerify ?? false }),
-    );
+      callApi(repository, 'commit', value, { noVerify: options.noVerify ?? false }));
   }
   return run(repository, 'Continuing rebase', () =>
-    repository.commit(repository.state.rebaseCommit.message, {}),
-  );
+    callApi(repository, 'commit', repository.state.rebaseCommit.message, {}));
 }
 
 async function abortOperation(repository, operation, options = {}) {
@@ -106,14 +131,14 @@ async function abortOperation(repository, operation, options = {}) {
   );
   if (picked !== action) return false;
   return run(repository, `Aborting ${operation}`, () => operation === 'merge'
-    ? repository.mergeAbort()
+    ? callApi(repository, 'mergeAbort')
     : runGit(repository, options.gitPath, ['rebase', '--abort']));
 }
 
 function pullMerge(repository, { noVerify = false, gitPath } = {}) {
   return run(repository, 'Pulling changes with merge', async () => {
-    if (!noVerify) return repository.pull();
-    await repository.fetch();
+    if (!noVerify) return callApi(repository, 'pull');
+    await callApi(repository, 'fetch');
     await runGit(repository, gitPath, ['merge', '--no-edit', '--no-verify', '@{upstream}']);
   });
 }
@@ -121,9 +146,9 @@ function pullMerge(repository, { noVerify = false, gitPath } = {}) {
 function pullRebase(repository, { noVerify = false, gitPath } = {}) {
   return run(repository, 'Pulling changes with rebase', async () => {
     if (!noVerify) {
-      return vscode.commands.executeCommand('git.pullRebase', repository.rootUri);
+      return runVsCodeCommand(repository, 'git.pullRebase', repository.rootUri);
     }
-    await repository.fetch();
+    await callApi(repository, 'fetch');
     await runGit(repository, gitPath, ['rebase', '--no-verify', '@{upstream}']);
   });
 }
@@ -131,7 +156,7 @@ function pullRebase(repository, { noVerify = false, gitPath } = {}) {
 function push(repository, { noVerify = false, gitPath } = {}) {
   return run(repository, 'Pushing changes', () => noVerify
     ? runGit(repository, gitPath, ['push', '--no-verify'])
-    : repository.push());
+    : callApi(repository, 'push'));
 }
 
 async function resetToOrigin(repository, { gitPath } = {}) {
@@ -164,23 +189,22 @@ async function resetToOrigin(repository, { gitPath } = {}) {
     return false;
   }
   return run(repository, `Resetting ${branch} to origin`, async () => {
-    await repository.fetch('origin', branch);
+    await callApi(repository, 'fetch', 'origin', branch);
     await runGit(repository, gitPath, ['reset', '--hard', `refs/remotes/origin/${branch}`]);
   });
 }
 
 function checkoutDetached(repository, ref) {
-  return run(repository, 'Checking out commit', () => repository.checkout(ref));
+  return run(repository, 'Checking out commit', () => callApi(repository, 'checkout', ref));
 }
 
 function createBranchFromCommit(repository, name, ref) {
   return run(repository, `Creating branch ${name}`, () =>
-    repository.createBranch(name, true, ref),
-  );
+    callApi(repository, 'createBranch', name, true, ref));
 }
 
 function createTagFromCommit(repository, name, ref) {
-  return run(repository, `Creating tag ${name}`, () => repository.tag(name, '', ref));
+  return run(repository, `Creating tag ${name}`, () => callApi(repository, 'tag', name, '', ref));
 }
 
 function cherryPick(repository, ref, { gitPath } = {}) {
@@ -199,11 +223,7 @@ function amendMessage(repository, message, { noVerify = false, gitPath } = {}) {
 
 async function emptyTreeHash(repository, { gitPath } = {}) {
   if (!gitPath) throw new Error('Git executable unavailable.');
-  const { stdout } = await execGit(
-    gitPath,
-    ['hash-object', '-t', 'tree', os.devNull],
-    { cwd: repository.rootUri.fsPath },
-  );
+  const { stdout } = await exec(repository, gitPath, ['hash-object', '-t', 'tree', os.devNull]);
   const hash = stdout.trim();
   if (!hash) throw new Error('Unable to resolve the empty Git tree.');
   return hash;
@@ -218,18 +238,16 @@ function rollback(repository, ref, mode, { gitPath } = {}) {
 
 function stash(repository) {
   return run(repository, 'Stashing changes', () =>
-    repository.createStash({ includeUntracked: true }),
-  );
+    callApi(repository, 'createStash', { includeUntracked: true }));
 }
 
 function popStash(repository) {
-  return run(repository, 'Popping latest stash', () => repository.popStash());
+  return run(repository, 'Popping latest stash', () => callApi(repository, 'popStash'));
 }
 
 function popStashSelected(repository) {
   return run(repository, 'Popping stash', () =>
-    vscode.commands.executeCommand('git.stashPop', repository.rootUri),
-  );
+    runVsCodeCommand(repository, 'git.stashPop', repository.rootUri));
 }
 
 function stage(repository, filePath) {
@@ -237,15 +255,16 @@ function stage(repository, filePath) {
 }
 
 function unstage(repository, filePath) {
-  return run(repository, 'Unstaging file', () => repository.revert([filePath]));
+  return run(repository, 'Unstaging file', () => callApi(repository, 'revert', [filePath]));
 }
 
 function stageAll(repository, filePaths) {
-  return run(repository, filePaths.length === 1 ? 'Staging file' : 'Staging all changes', () => repository.add(filePaths));
+  return run(repository, filePaths.length === 1 ? 'Staging file' : 'Staging all changes', () =>
+    callApi(repository, 'add', filePaths));
 }
 
 function unstageAll(repository) {
-  return run(repository, 'Unstaging all changes', () => repository.revert([]));
+  return run(repository, 'Unstaging all changes', () => callApi(repository, 'revert', []));
 }
 
 async function discard(repository, filePath) {
@@ -257,7 +276,7 @@ async function discard(repository, filePath) {
     discardLabel,
   );
   if (choice === discardLabel) {
-    await run(repository, 'Discarding changes', () => repository.clean([filePath]));
+    await run(repository, 'Discarding changes', () => callApi(repository, 'clean', [filePath]));
   }
 }
 
@@ -277,8 +296,8 @@ async function discardAll(repository, kind, filePaths) {
   );
   if (choice !== label) return false;
   return run(repository, label, async () => {
-    if (staged) await repository.revert(filePaths);
-    await repository.clean(filePaths);
+    if (staged) await callApi(repository, 'revert', filePaths);
+    await callApi(repository, 'clean', filePaths);
   });
 }
 
@@ -294,23 +313,24 @@ async function commit(repository, message, { noVerify = false } = {}) {
         ...repository.state.untrackedChanges,
       ].map((change) => change.uri.fsPath))];
       if (!paths.length) throw new Error('No changes to commit.');
-      await repository.add(paths);
+      await callApi(repository, 'add', paths);
     }
-    await repository.commit(value, { noVerify });
+    await callApi(repository, 'commit', value, { noVerify });
   });
 }
 
 async function pickBranch(repository) {
   if (!repository) return;
   const current = repository.state.HEAD?.name;
-  const refs = await repository.getBranches({ remote: false });
+  const refs = await callApi(repository, 'getBranches', { remote: false });
   const branches = [...new Set(refs.map((ref) => ref.name).filter(Boolean))].sort();
   const picked = await vscode.window.showQuickPick(
     branches.map((name) => ({ label: name, description: name === current ? 'current' : undefined })),
     { title: 'Switch Branch', placeHolder: current ?? 'Select a branch' },
   );
   if (picked && picked.label !== current) {
-    await run(repository, `Switching to ${picked.label}`, () => repository.checkout(picked.label));
+    await run(repository, `Switching to ${picked.label}`, () =>
+      callApi(repository, 'checkout', picked.label));
   }
 }
 
@@ -326,6 +346,7 @@ module.exports = {
   discard,
   discardAll,
   emptyTreeHash,
+  fetch,
   operationState,
   pickBranch,
   popStash,
@@ -337,6 +358,7 @@ module.exports = {
   push,
   resetToOrigin,
   rollback,
+  setLog,
   stage,
   stageAll,
   stash,

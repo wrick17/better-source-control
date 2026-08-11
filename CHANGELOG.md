@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.3 — 2026-08-11
+
+### Added
+
+- Added a global **Fetch All Repositories** button.
+- Added start, completion, duplicate-suppression, failure, and individual Git API, VS Code command, Git executable, and AI CLI invocation logs to the **Better Source Control** Output channel.
+
 ## 1.0.2 — 2026-08-11
 
 ### Added

@@ -33,6 +33,7 @@ function busyLabel(message) {
       pullMerge: 'Pulling changes',
       pullRebase: 'Pulling with rebase',
       pullFrom: 'Pulling from branch',
+      fetch: 'Fetching changes',
       push: 'Pushing changes',
       resetToOrigin: 'Resetting branch to origin',
       stash: 'Stashing changes',
@@ -81,20 +82,33 @@ class RepositoryViewProvider {
 
   async receiveMessage(message) {
     const tracked = message.repositoryId && BUSY_MESSAGE_TYPES.has(message.type);
-    if (tracked && this.busyRepositories.has(message.repositoryId)) return;
+    const label = tracked ? busyLabel(message) : undefined;
+    const repository = tracked ? path.basename(message.repositoryId) : undefined;
+    if (tracked && this.busyRepositories.has(message.repositoryId)) {
+      this.log?.warn(`[${repository}] ${label} ignored because another operation is running.`);
+      return;
+    }
+    const startedAt = tracked ? Date.now() : undefined;
     if (tracked) {
+      this.log?.info(`[${repository}] ${label} started.`);
       this.busyRepositories.add(message.repositoryId);
       await this.view?.webview.postMessage({
         type: 'busy',
         repositoryId: message.repositoryId,
         busy: true,
-        label: busyLabel(message),
+        label,
       });
     }
     try {
       await this.handleMessage(message);
+      if (tracked) this.log?.info(`[${repository}] ${label} finished in ${Date.now() - startedAt} ms.`);
     } catch (error) {
-      this.log?.error(`Failed to handle ${message.type}.`, error);
+      this.log?.error(
+        tracked
+          ? `[${repository}] ${label} failed after ${Date.now() - startedAt} ms.`
+          : `Failed to handle ${message.type}.`,
+        error,
+      );
       await vscode.window.showErrorMessage(
         `Better Source Control failed: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -786,7 +800,7 @@ class RepositoryViewProvider {
       await this.refresh();
     } else if (message.type === 'abortOperation' && ['merge', 'rebase'].includes(message.operation)) {
       await git.abortOperation(repository, message.operation, operationOptions);
-    } else if (message.type === 'operation' && ['pullMerge', 'pullRebase', 'pullFrom', 'push', 'resetToOrigin', 'stash', 'popStashSelected', 'popStash'].includes(message.operation)) {
+    } else if (message.type === 'operation' && ['fetch', 'pullMerge', 'pullRebase', 'pullFrom', 'push', 'resetToOrigin', 'stash', 'popStashSelected', 'popStash'].includes(message.operation)) {
       await git[message.operation](repository, operationOptions);
     } else if (message.type === 'commit') {
       if (await git.commit(repository, message.message, operationOptions)) {
@@ -2307,6 +2321,8 @@ async function activate(context) {
   }
   const api = extension.getAPI(1);
   log.info(`Git API state: ${api.state}; repositories: ${api.repositories.length}.`);
+  git.setLog(log);
+  ai.setLog(log);
   const provider = new RepositoryViewProvider(api, context, log);
   await vscode.commands.executeCommand('setContext', 'gitChangeStats.available', true);
   await vscode.commands.executeCommand('setContext', 'gitChangeStats.viewMode', provider.viewMode);
@@ -2319,6 +2335,16 @@ async function activate(context) {
       provideTextDocumentContent: () => '',
     }),
     vscode.commands.registerCommand('gitChangeStats.refresh', () => provider.refresh()),
+    vscode.commands.registerCommand('gitChangeStats.fetchAll', async () => {
+      const repositories = [...api.repositories];
+      log.info(`Fetching all ${repositories.length} repositories.`);
+      await Promise.all(repositories.map((repository) => provider.receiveMessage({
+        type: 'operation',
+        operation: 'fetch',
+        repositoryId: repository.rootUri.fsPath,
+      })));
+      log.info(`Finished fetching all ${repositories.length} repositories.`);
+    }),
     vscode.commands.registerCommand('gitChangeStats.listView', () => provider.setViewMode('list')),
     vscode.commands.registerCommand('gitChangeStats.treeView', () => provider.setViewMode('tree')),
     vscode.commands.registerCommand('gitChangeStats.expandAll', () => provider.expandAll()),

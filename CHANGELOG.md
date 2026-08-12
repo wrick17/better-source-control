@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.8 — 2026-08-12
+
+### Added
+
+- Added **Open Changes on Remote** to commit actions.
+- Made commit authors open their linked GitHub profiles.
+
+### Changed
+
+- Delayed the first tooltip by one second while keeping direct tooltip-to-tooltip transitions immediate.
+- Moved **Open Changes** into expanded commit details, kept it visible, and aligned it with the commit date column.
+
 ## 1.0.7 — 2026-08-12
 
 ### Fixed

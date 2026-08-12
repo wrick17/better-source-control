@@ -520,6 +520,40 @@ class RepositoryViewProvider {
     );
   }
 
+  async openGraphRemote(repository, commit, author = false) {
+    const remote = githubRepository(repository);
+    if (!remote) {
+      await vscode.window.showInformationMessage('This repository has no GitHub remote.');
+      return;
+    }
+    if (!author) {
+      await vscode.env.openExternal(vscode.Uri.parse(`${remote.url}/commit/${commit.hash}`));
+      return;
+    }
+    const session = await vscode.authentication.getSession('github', ['repo'], { createIfNone: true });
+    const response = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.repo)}/commits/${encodeURIComponent(commit.hash)}`,
+      {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${session.accessToken}`,
+          'X-GitHub-Api-Version': '2026-03-10',
+        },
+      },
+    );
+    if (!response.ok) throw new Error(`GitHub returned ${response.status} while resolving the commit author.`);
+    const profile = (await response.json()).author?.html_url;
+    if (!profile) {
+      await vscode.window.showInformationMessage('GitHub does not link this commit author to a profile.');
+      return;
+    }
+    const profileUrl = new URL(profile);
+    if (profileUrl.protocol !== 'https:' || profileUrl.hostname !== 'github.com') {
+      throw new Error('GitHub returned an invalid author profile URL.');
+    }
+    await vscode.env.openExternal(vscode.Uri.parse(profileUrl.href));
+  }
+
   async rollbackGraphCommit(repository, commit) {
     const head = repository.state.HEAD;
     if (repository.state.rebaseCommit || repository.state.mergeChanges.length) {
@@ -679,6 +713,14 @@ class RepositoryViewProvider {
       }
       if (message.type === 'graphOpen' && commit) {
         await vscode.commands.executeCommand('git.viewCommit', repository.rootUri, commit.hash);
+        return;
+      }
+      if (message.type === 'graphOpenRemote' && commit) {
+        await this.openGraphRemote(repository, commit);
+        return;
+      }
+      if (message.type === 'graphOpenAuthor' && commit) {
+        await this.openGraphRemote(repository, commit, true);
         return;
       }
       if (message.type === 'graphCopyHash' && commit) {
@@ -986,6 +1028,35 @@ function fullRefName(ref) {
       : `refs/tags/${ref.name}`;
 }
 
+function githubRepository(repository) {
+  const remotes = repository.state.remotes ?? [];
+  const preferred = repository.state.HEAD?.upstream?.remote;
+  for (const remote of [
+    remotes.find(({ name }) => name === preferred),
+    remotes.find(({ name }) => name === 'origin'),
+    ...remotes,
+  ]) {
+    for (const value of [remote?.fetchUrl, remote?.pushUrl]) {
+      if (!value) continue;
+      const normalized = value.trim()
+        .replace(/^git@github\.com:/i, 'https://github.com/')
+        .replace(/^ssh:\/\/git@github\.com(?::\d+)?\//i, 'https://github.com/');
+      let url;
+      try {
+        url = new URL(normalized);
+      } catch {
+        continue;
+      }
+      const [owner, name, ...rest] = url.pathname.replace(/^\/+|\/+$/g, '').split('/');
+      const repo = name?.replace(/\.git$/i, '');
+      if (url.hostname.toLowerCase() === 'github.com' && !rest.length
+        && /^[\w.-]+$/.test(owner ?? '') && /^[\w.-]+$/.test(repo ?? '')) {
+        return { owner, repo, url: `https://github.com/${owner}/${repo}` };
+      }
+    }
+  }
+}
+
 function emptyStats() {
   return { insertions: 0, deletions: 0 };
 }
@@ -1168,6 +1239,9 @@ function html() {
     .graph-subject { min-width: 40px; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .graph-author, .graph-date { min-width: 0; overflow: hidden; color: var(--vscode-descriptionForeground); text-overflow: ellipsis; white-space: nowrap; }
     .graph-author { max-width: 105px; flex: 1 1 105px; }
+    .graph-author-link { padding: 0; border: 0; overflow: hidden; color: inherit; background: transparent; cursor: pointer; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+    .graph-author-link:hover { color: var(--vscode-foreground); text-decoration: underline; }
+    .graph-author-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
     .graph-date { min-width: max-content; flex: none; font-size: 11px; }
     .graph-commit-meta { min-width: 0; display: flex; flex: 0 1 auto; align-items: center; gap: 5px; margin-left: auto; }
     .graph-refs { min-width: 0; display: flex; flex: 1 1 auto; gap: 3px; overflow: hidden; }
@@ -1175,15 +1249,15 @@ function html() {
     .graph-ref.remote { color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 20%, transparent); }
     .graph-ref.tag { color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-charts-orange, #d18616) 20%, transparent); }
     .graph-ref.current { outline: 1px solid var(--vscode-focusBorder); }
-    .graph-inline-action, .graph-menu-action { width: 20px; display: flex; flex: none; visibility: hidden; }
-    .graph-row:hover .graph-inline-action, .graph-row:focus-within .graph-inline-action,
+    .graph-menu-action { width: 20px; display: flex; flex: none; visibility: hidden; }
     .graph-row:hover .graph-menu-action, .graph-row:focus-within .graph-menu-action { visibility: visible; }
     .graph-lane-extensions { position: absolute; inset: 22px 0 0; pointer-events: none; }
     .graph-lane-extension { position: absolute; inset-block: 0; width: 1px; transform: translateX(-.5px); }
     .graph-details { margin: 0 4px 0 15px; padding: 4px 5px 8px 8px; color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent); }
     .graph-detail-head { display: flex; align-items: center; gap: 5px; min-height: 22px; }
     .graph-message { min-width: 0; flex: 1; color: var(--vscode-foreground); font-size: 12px; line-height: 16px; white-space: pre-wrap; }
-    .graph-meta { font-size: 11px; }
+    .graph-meta { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+    .graph-meta > .icon-button { flex: none; margin-left: auto; margin-right: 20px; }
     .graph-detail-head + .graph-meta { margin-top: 4px; }
     .graph-hash { padding: 0; border: 0; color: inherit; background: transparent; cursor: pointer; font: inherit; }
     .graph-hash:hover { color: var(--vscode-foreground); text-decoration: underline; }
@@ -1293,7 +1367,7 @@ function html() {
       tooltip.classList.remove('visible');
     }
 
-    function showTooltip(target) {
+    function showTooltip(target, delay = tooltip.classList.contains('visible') ? 0 : 1000) {
       hideTooltip();
       if (!target?.dataset.tooltip || target.getAttribute('aria-expanded') === 'true') return;
       tooltipTarget = target;
@@ -1311,7 +1385,7 @@ function html() {
         tooltip.style.top = Math.max(4, anchor.bottom + bounds.height + 4 <= innerHeight
           ? anchor.bottom + 4
           : anchor.top - bounds.height - 4) + 'px';
-      }, 75);
+      }, delay);
     }
 
     document.addEventListener('pointerover', (event) => {
@@ -1319,7 +1393,8 @@ function html() {
       if (target && !target.contains(event.relatedTarget)) showTooltip(target);
     });
     document.addEventListener('pointerout', (event) => {
-      if (tooltipTarget && !tooltipTarget.contains(event.relatedTarget)) hideTooltip();
+      const nextTarget = event.relatedTarget?.closest?.('[data-tooltip]');
+      if (tooltipTarget && !tooltipTarget.contains(event.relatedTarget) && !nextTarget) hideTooltip();
     });
     document.addEventListener('focusin', (event) => showTooltip(event.target.closest?.('[data-tooltip]')));
     document.addEventListener('focusout', hideTooltip);
@@ -1955,7 +2030,9 @@ function html() {
       row.addEventListener('click', (event) => {
         if (!event.target.closest('button')) graphPost('graphSelect', commit);
       });
-      row.addEventListener('dblclick', () => graphPost('graphOpen', commit));
+      row.addEventListener('dblclick', (event) => {
+        if (!event.target.closest('button')) graphPost('graphOpen', commit);
+      });
       row.addEventListener('keydown', (event) => {
         const rows = [...graphRoot.querySelectorAll('.graph-row')];
         const index = rows.indexOf(row);
@@ -1979,11 +2056,9 @@ function html() {
       const lane = graphSvg(commit);
       const subject = el('span', 'graph-subject', commit.subject);
       subject.dataset.tooltip = commit.message;
-      const openAction = el('span', 'graph-inline-action');
-      openAction.append(button('files', 'Open commit changes', () => graphPost('graphOpen', commit)));
-      row.append(lane, subject, openAction);
+      row.append(lane, subject);
       const meta = el('span', 'graph-commit-meta');
-      meta.append(el('span', 'graph-author', commit.author));
+      meta.append(graphAuthor(commit, 'graph-author'));
       if (refs.length) {
         const badges = el('span', 'graph-refs');
         refs.slice(0, 3).forEach((ref) => {
@@ -2105,16 +2180,16 @@ function html() {
       hash.addEventListener('click', () => graphPost('graphCopyHash', commit));
       meta.append(
         hash,
-        document.createTextNode(' · ' + commit.author + ' · ' + formatDate(commit.date)
+        document.createTextNode(' · '),
+        graphAuthor(commit),
+        document.createTextNode(' · ' + formatDate(commit.date)
           + (commit.files ? ' · ' + commit.files + ' files · +' + commit.insertions + ' −' + commit.deletions : '')),
+        button('files', 'Open all commit changes', () => graphPost('graphOpen', commit)),
       );
       const body = commit.message.split(/\\r?\\n/).slice(1).join('\\n').trim();
       if (body) {
         const head = el('div', 'graph-detail-head');
-        head.append(
-          el('span', 'graph-message', body),
-          button('files', 'Open all commit changes', () => graphPost('graphOpen', commit)),
-        );
+        head.append(el('span', 'graph-message', body));
         details.append(head);
       }
       details.append(meta);
@@ -2158,6 +2233,15 @@ function html() {
       return details;
     }
 
+    function graphAuthor(commit, className = '') {
+      const author = el('button', (className + ' graph-author-link').trim(), commit.author);
+      author.type = 'button';
+      author.dataset.tooltip = 'Open GitHub profile';
+      author.setAttribute('aria-label', 'Open GitHub profile for ' + commit.author);
+      author.addEventListener('click', () => graphPost('graphOpenAuthor', commit));
+      return author;
+    }
+
     function graphMenu(commit) {
       const menu = el('div', 'repo-menu');
       menu.setAttribute('popover', 'auto');
@@ -2176,6 +2260,7 @@ function html() {
       }
       menu.append(
         menuItem('Open Changes', action('graphOpen')),
+        menuItem('Open Changes on Remote', action('graphOpenRemote')),
         menuSeparator(),
         menuItem('Checkout Detached', action('graphCheckout')),
         menuItem('Create Branch from Commit…', action('graphCreateBranch')),
@@ -2364,4 +2449,12 @@ async function activate(context) {
 
 function deactivate() {}
 
-module.exports = { activate, deactivate, fullRefName, html, openDiff, RepositoryViewProvider };
+module.exports = {
+  activate,
+  deactivate,
+  fullRefName,
+  githubRepository,
+  html,
+  openDiff,
+  RepositoryViewProvider,
+};

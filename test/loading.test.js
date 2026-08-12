@@ -6,8 +6,11 @@ const test = require('node:test');
 
 const load = Module._load;
 const executedCommands = [];
+const openedExternal = [];
+const authenticationRequests = [];
 let mergeEditor = false;
 let fullRefName;
+let githubRepository;
 let RepositoryViewProvider;
 let html;
 let git;
@@ -16,8 +19,19 @@ try {
   Module._load = (request, parent, isMain) =>
     request === 'vscode'
       ? {
+          authentication: {
+            getSession: async (...args) => {
+              authenticationRequests.push(args);
+              return { accessToken: 'token' };
+            },
+          },
           commands: { executeCommand: async (...args) => executedCommands.push(args) },
-          window: { showErrorMessage: async () => {} },
+          env: {
+            clipboard: { writeText: async () => {} },
+            openExternal: async (uri) => openedExternal.push(uri.toString()),
+          },
+          Uri: { parse: (value) => ({ toString: () => value }) },
+          window: { showErrorMessage: async () => {}, showInformationMessage: async () => {} },
           workspace: { getConfiguration: (section) => ({
             get: (key, fallback) => section === 'git' && key === 'mergeEditor'
               ? mergeEditor
@@ -25,7 +39,7 @@ try {
           }) },
         }
       : load(request, parent, isMain);
-  ({ fullRefName, html, openDiff, RepositoryViewProvider } = require('../extension'));
+  ({ fullRefName, githubRepository, html, openDiff, RepositoryViewProvider } = require('../extension'));
   git = require('../git-operations');
 } finally {
   Module._load = load;
@@ -74,6 +88,8 @@ test('generates valid webview JavaScript', () => {
   assert.doesNotThrow(() => new Function(script));
   assert.doesNotMatch(script, /\.title\s*=/);
   assert.match(markup, /\.custom-tooltip \{/);
+  assert.match(markup, /delay = tooltip\.classList\.contains\('visible'\) \? 0 : 1000/);
+  assert.match(markup, /const nextTarget = event\.relatedTarget\?\.closest\?\.\('\[data-tooltip\]'\)/);
   assert.match(markup, /\.file-name \{ flex: none; \}/);
   assert.match(markup, /directory\.dataset\.tooltip = (node|file)\.directory/);
   assert.match(markup, /Resolve all conflicts with AI/);
@@ -85,7 +101,58 @@ test('generates valid webview JavaScript', () => {
   assert.match(markup, /section\.inert = Boolean\(progressLabel\)/);
   assert.match(markup, /section\.setAttribute\('aria-busy'/);
   assert.match(markup, /\.graph-date \{ min-width: max-content;/);
+  assert.doesNotMatch(markup, /graph-inline-action/);
+  assert.match(markup, /\.graph-meta > \.icon-button \{ flex: none; margin-left: auto; margin-right: 20px; \}/);
+  assert.match(markup, /meta\.append\(\s*hash,[\s\S]*?button\('files', 'Open all commit changes'/);
+  assert.match(markup, /menuItem\('Open Changes on Remote', action\('graphOpenRemote'\)\)/);
+  assert.match(markup, /graphAuthor\(commit, 'graph-author'\)/);
   assert.match(markup, /if \(scrollTop !== undefined\) list\.scrollTop = scrollTop;/);
+});
+
+test('resolves GitHub remotes and opens commits and linked author profiles', async () => {
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: {
+      HEAD: { upstream: { remote: 'upstream' } },
+      remotes: [
+        { name: 'origin', fetchUrl: 'https://github.com/fallback/project.git' },
+        { name: 'upstream', fetchUrl: 'git@github.com:acme/project.git' },
+      ],
+    },
+  };
+  assert.deepEqual(githubRepository(repository), {
+    owner: 'acme',
+    repo: 'project',
+    url: 'https://github.com/acme/project',
+  });
+
+  const commit = { hash: 'abc123', author: 'Ada Lovelace' };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { repositories: [repository] },
+    graph: { repositoryId: '/repo', commits: [commit] },
+  });
+  const originalFetch = global.fetch;
+  let request;
+  global.fetch = async (...args) => {
+    request = args;
+    return { ok: true, json: async () => ({ author: { html_url: 'https://github.com/ada' } }) };
+  };
+  openedExternal.length = 0;
+  authenticationRequests.length = 0;
+  try {
+    await provider.handleMessage({ type: 'graphOpenRemote', repositoryId: '/repo', hash: commit.hash });
+    await provider.handleMessage({ type: 'graphOpenAuthor', repositoryId: '/repo', hash: commit.hash });
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.deepEqual(openedExternal, [
+    'https://github.com/acme/project/commit/abc123',
+    'https://github.com/ada',
+  ]);
+  assert.deepEqual(authenticationRequests, [['github', ['repo'], { createIfNone: true }]]);
+  assert.equal(request[0], 'https://api.github.com/repos/acme/project/commits/abc123');
+  assert.equal(request[1].headers.Authorization, 'Bearer token');
 });
 
 test('exposes separate AI controls with a shared provider', () => {

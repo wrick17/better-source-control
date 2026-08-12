@@ -7,6 +7,7 @@ const { promisify } = require('node:util');
 const vscode = require('vscode');
 
 const execGit = promisify(execFile);
+let execQueue = Promise.resolve();
 let log;
 
 function setLog(value) {
@@ -29,8 +30,14 @@ function runVsCodeCommand(repository, command, ...args) {
 }
 
 function exec(repository, gitPath, args, options = {}) {
-  logInvocation(repository, [gitPath, ...args].map((value) => JSON.stringify(value)).join(' '));
-  return execGit(gitPath, args, { cwd: repository.rootUri.fsPath, ...options });
+  const invocation = [gitPath, ...args].map((value) => JSON.stringify(value)).join(' ');
+  // ponytail: one process at a time; add a small pool only if large workspaces prove this too slow.
+  const result = execQueue.then(() => {
+    logInvocation(repository, invocation);
+    return execGit(gitPath, args, { cwd: repository.rootUri.fsPath, ...options });
+  });
+  execQueue = result.catch(() => {});
+  return result;
 }
 
 async function run(repository, title, action) {

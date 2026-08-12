@@ -230,6 +230,30 @@ test('reports repository loading failures instead of leaving the view loading', 
   assert.equal(errors.length, 1);
 });
 
+test('stops a superseded repository refresh', async () => {
+  const repository = (fsPath) => ({ rootUri: { fsPath }, state: {} });
+  const calls = [];
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: {
+      state: 'initialized',
+      repositories: [repository('/a'), repository('/b')],
+    },
+    expanded: new Set(),
+    expansionTouched: new Set(),
+    repositoryOrder: [],
+    view: { webview: { postMessage: async () => {} } },
+    repositoryData: async ({ rootUri }) => {
+      calls.push(rootUri.fsPath);
+      provider.refreshId += 1;
+      return {};
+    },
+  });
+
+  await provider.refresh();
+
+  assert.deepEqual(calls, ['/a']);
+});
+
 test('reorders repositories and remembers the workspace order', async () => {
   const saved = [];
   const repository = (fsPath) => ({ rootUri: { fsPath } });

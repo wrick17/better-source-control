@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.5 — 2026-08-12
+
+### Fixed
+
+- Prevented overlapping repository refreshes from exhausting the VS Code extension host's file descriptors.
+
 ## 1.0.4 — 2026-08-11
 
 ### Fixed

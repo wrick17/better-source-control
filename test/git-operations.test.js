@@ -5,11 +5,12 @@ const Module = require('node:module');
 const test = require('node:test');
 
 const gitExecCalls = [];
-const fakeExecFile = () => {};
-fakeExecFile[Symbol.for('nodejs.util.promisify.custom')] = async (file, args, options) => {
+let execFileImpl = async (file, args, options) => {
   gitExecCalls.push([file, args, options]);
   return { stdout: args[0] === 'hash-object' ? 'empty-tree\n' : '', stderr: '' };
 };
+const fakeExecFile = () => {};
+fakeExecFile[Symbol.for('nodejs.util.promisify.custom')] = (...args) => execFileImpl(...args);
 const originalLoad = Module._load;
 Module._load = function load(request, parent, isMain) {
   if (request === 'node:child_process') {
@@ -147,6 +148,32 @@ test('fetch uses the native repository API', async () => {
     assert.deepEqual(logs, ['[repo] > Git API repository.fetch()']);
   } finally {
     setLog(undefined);
+  }
+});
+
+test('serializes direct Git processes', async () => {
+  let active = 0;
+  let maxActive = 0;
+  const original = execFileImpl;
+  execFileImpl = async () => {
+    maxActive = Math.max(maxActive, ++active);
+    await new Promise(setImmediate);
+    active -= 1;
+    return { stdout: '', stderr: '' };
+  };
+  const repository = (fsPath) => ({
+    rootUri: { fsPath },
+    state: { mergeChanges: [] },
+  });
+
+  try {
+    await Promise.all([
+      operationState(repository('/a'), { gitPath: '/git' }),
+      operationState(repository('/b'), { gitPath: '/git' }),
+    ]);
+    assert.equal(maxActive, 1);
+  } finally {
+    execFileImpl = original;
   }
 });
 

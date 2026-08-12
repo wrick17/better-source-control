@@ -174,11 +174,12 @@ class RepositoryViewProvider {
       const id = repository.rootUri.fsPath;
       if (changedFileCount(repository.state) && !this.expansionTouched.has(id)) this.expanded.add(id);
     }
-    let repositories;
+    const repositories = [];
     try {
-      repositories = await Promise.all(
-        openRepositories.map((repository) => this.repositoryData(repository)),
-      );
+      for (const repository of openRepositories) {
+        repositories.push(await this.repositoryData(repository));
+        if (refreshId !== this.refreshId) return;
+      }
     } catch (error) {
       this.log?.error('Failed to load repositories.', error);
       if (refreshId === this.refreshId) {

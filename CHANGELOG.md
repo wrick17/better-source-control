@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.6 — 2026-08-12
+
+### Fixed
+
+- Kept repository line statistics visible while updated values are calculated.
+
 ## 1.0.5 — 2026-08-12
 
 ### Fixed

@@ -230,6 +230,32 @@ test('reports repository loading failures instead of leaving the view loading', 
   assert.equal(errors.length, 1);
 });
 
+test('keeps the last completed stats visible while refreshing them', () => {
+  let stateChanged;
+  const stats = { insertions: 12, deletions: 3 };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: {
+      repositories: [{
+        rootUri: { fsPath: '/repo' },
+        state: { onDidChange: (listener) => {
+          stateChanged = listener;
+          return { dispose() {} };
+        } },
+      }],
+    },
+    dirtyStats: new Set(),
+    repositoryListeners: [],
+    scheduleRefresh() {},
+    stats: new Map([['/repo', stats]]),
+  });
+
+  provider.syncRepositories();
+  stateChanged();
+
+  assert.equal(provider.stats.get('/repo'), stats);
+  assert.equal(provider.dirtyStats.has('/repo'), true);
+});
+
 test('stops a superseded repository refresh', async () => {
   const repository = (fsPath) => ({ rootUri: { fsPath }, state: {} });
   const calls = [];

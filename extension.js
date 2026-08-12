@@ -137,7 +137,6 @@ class RepositoryViewProvider {
       ...this.api.repositories.map((repository) =>
         repository.state.onDidChange(() => {
           const id = repository.rootUri.fsPath;
-          this.stats.delete(id);
           this.dirtyStats.add(id);
           if (this.graph?.repositoryId === id) {
             this.graph.outdated = true;

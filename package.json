@@ -6,7 +6,7 @@
   "publisher": "wrick17",
   "repository": {
     "type": "git",
-    "url": "https://github.com/wrick17/git-change-stats.git"
+    "url": "https://github.com/wrick17/better-source-control.git"
   },
   "license": "UNLICENSED",
   "private": true,
@@ -203,7 +203,7 @@
   },
   "scripts": {
     "test": "node --test",
-    "package": "bunx @vscode/vsce package --out ${TMPDIR:-/tmp}/git-change-stats.vsix",
-    "install:local": "bun run package && code --install-extension ${TMPDIR:-/tmp}/git-change-stats.vsix --force && rm -f ${TMPDIR:-/tmp}/git-change-stats.vsix"
+    "package": "bunx @vscode/vsce package --out ${TMPDIR:-/tmp}/better-source-control.vsix",
+    "install:local": "bun run package && code --install-extension ${TMPDIR:-/tmp}/better-source-control.vsix --force && rm -f ${TMPDIR:-/tmp}/better-source-control.vsix"
   }
 }

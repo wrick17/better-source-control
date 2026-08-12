@@ -85,6 +85,7 @@ test('generates valid webview JavaScript', () => {
   assert.match(markup, /section\.inert = Boolean\(progressLabel\)/);
   assert.match(markup, /section\.setAttribute\('aria-busy'/);
   assert.match(markup, /\.graph-date \{ min-width: max-content;/);
+  assert.match(markup, /if \(scrollTop !== undefined\) list\.scrollTop = scrollTop;/);
 });
 
 test('exposes separate AI controls with a shared provider', () => {

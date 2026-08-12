@@ -1257,9 +1257,12 @@ function html() {
       } else if (data.type === 'busy') {
         data.busy ? busy.set(data.repositoryId, data.label) : busy.delete(data.repositoryId);
       } else if (data.type === 'graph') {
+        const scrollTop = graph?.repositoryId === data.graph?.repositoryId
+          ? graphRoot.querySelector('.graph-list')?.scrollTop
+          : undefined;
         if (graph?.repositoryId !== data.graph?.repositoryId) graphQuery = '';
         graph = data.graph;
-        renderGraph();
+        renderGraph(scrollTop);
         return;
       } else {
         return;
@@ -1791,7 +1794,7 @@ function html() {
       return file;
     }
 
-    function renderGraph() {
+    function renderGraph(scrollTop) {
       hideTooltip();
       graphRoot.replaceChildren();
       const collapsed = !graph || graph.collapsed;
@@ -1888,6 +1891,7 @@ function html() {
       });
       graphRoot.append(resizer, header, search, list);
       renderGraphList(list);
+      if (scrollTop !== undefined) list.scrollTop = scrollTop;
     }
 
     function setGraphHeight(value) {

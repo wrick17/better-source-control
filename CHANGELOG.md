@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.7 — 2026-08-12
+
+### Fixed
+
+- Kept the commit graph's scroll position when opening commit details.
+
 ## 1.0.6 — 2026-08-12
 
 ### Fixed

@@ -12,6 +12,7 @@ let execFileImpl = async (file, args, options) => {
 const fakeExecFile = () => {};
 fakeExecFile[Symbol.for('nodejs.util.promisify.custom')] = (...args) => execFileImpl(...args);
 const originalLoad = Module._load;
+let showErrorMessage = async () => {};
 Module._load = function load(request, parent, isMain) {
   if (request === 'node:child_process') {
     return { execFile: fakeExecFile };
@@ -22,7 +23,7 @@ Module._load = function load(request, parent, isMain) {
       commands: { executeCommand: async (...args) => vscodeCommandCalls.push(args) },
       window: {
         withProgress: async (_, action) => action(),
-        showErrorMessage: async () => {},
+        showErrorMessage: (...args) => showErrorMessage(...args),
         showInformationMessage: async () => {},
         showQuickPick: async (items) => items[0],
         showWarningMessage: async (...args) => args.at(-1),
@@ -190,6 +191,25 @@ test('logs native operation failures to the extension output', async () => {
     assert.match(errors[0][1].message, /offline/);
   } finally {
     setLog(undefined);
+  }
+});
+
+test('releases failed Git operations before the error toast is dismissed', async () => {
+  let dismiss;
+  showErrorMessage = () => new Promise((resolve) => { dismiss = resolve; });
+  let completed = false;
+  const operation = push({
+    rootUri: { fsPath: '/repo' },
+    push: async () => { throw new Error('offline'); },
+  }).then(() => { completed = true; });
+
+  try {
+    await new Promise(setImmediate);
+    assert.equal(completed, true);
+  } finally {
+    dismiss?.();
+    await operation;
+    showErrorMessage = async () => {};
   }
 });
 

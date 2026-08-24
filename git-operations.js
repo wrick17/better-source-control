@@ -50,7 +50,7 @@ async function run(repository, title, action) {
     return true;
   } catch (error) {
     log?.error(`[${path.basename(repository.rootUri.fsPath)}] ${title} failed.`, error);
-    await vscode.window.showErrorMessage(
+    void vscode.window.showErrorMessage(
       `${title} failed: ${error instanceof Error ? error.message : String(error)}`,
     );
     return false;

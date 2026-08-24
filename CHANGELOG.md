@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.9 — 2026-08-24
+
+### Fixed
+
+- Released failed Git operations before their error notifications are dismissed.
+
 ## 1.0.8 — 2026-08-12
 
 ### Added

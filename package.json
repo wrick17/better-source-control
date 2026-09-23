@@ -2,7 +2,7 @@
   "name": "git-change-stats",
   "displayName": "Better Source Control",
   "description": "A clean multi-repository Git view with file stats, staging, branches, commits, stash, pull, and push.",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "publisher": "wrick17",
   "repository": {
     "type": "git",
@@ -57,7 +57,7 @@
           "type": "string",
           "order": 4,
           "default": "",
-          "description": "Model used to resolve merge and rebase conflicts. Empty uses the selected CLI's default."
+          "description": "Model used to resolve text conflicts during merge, rebase, cherry-pick, or revert. Empty uses the selected CLI's default."
         },
         "gitChangeStats.conflictReasoningEffort": {
           "type": "string",
@@ -69,6 +69,12 @@
           ],
           "default": "medium",
           "description": "Reasoning effort used to resolve merge and rebase conflicts."
+        },
+        "gitChangeStats.includeUntrackedContent": {
+          "type": "boolean",
+          "order": 6,
+          "default": false,
+          "description": "Include bounded contents of untracked text files in AI commit-message prompts when nothing is staged. May send sensitive new files to the selected AI provider; review files before enabling. Names are included regardless."
         },
         "gitChangeStats.showNoVerifyButton": {
           "type": "boolean",
@@ -202,7 +208,8 @@
     }
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test test/*.test.js",
+    "test:host": "node scripts/test-host.js",
     "package": "bunx @vscode/vsce package --out ${TMPDIR:-/tmp}/better-source-control.vsix",
     "install:local": "bun run package && code --install-extension ${TMPDIR:-/tmp}/better-source-control.vsix --force && rm -f ${TMPDIR:-/tmp}/better-source-control.vsix"
   }

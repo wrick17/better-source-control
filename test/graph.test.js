@@ -33,3 +33,17 @@ test('only marks loaded ancestors of HEAD as rollback targets', () => {
     [['head', false], ['parent', true], ['root', true], ['other', false]],
   );
 });
+
+test('ending one root preserves the lane and color of an unrelated history', () => {
+  const rows = layoutGraph([
+    { hash: 'a', parents: ['root-a'] },
+    { hash: 'b', parents: ['root-b'] },
+    { hash: 'root-a', parents: [] },
+    { hash: 'root-b', parents: [] },
+  ]);
+  assert.deepEqual(rows[2].output, [{ hash: 'root-b', color: rows[1].color }]);
+  assert.deepEqual(rows[3].input, rows[2].output);
+  assert.equal(rows[2].color, rows[0].color);
+  assert.equal(rows[3].color, rows[1].color);
+  assert.deepEqual(rows[3].output, []);
+});

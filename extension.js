@@ -6,11 +6,11 @@ const vscode = require('vscode');
 const {
   buildFileTree,
   changedFileCount,
-  countTextLines,
   formatChangeStats,
   statusBadge,
 } = require('./stats');
 const git = require('./git-operations');
+const { collectStats } = require('./repository-stats');
 const ai = require('./ai-commit');
 const { layoutGraph, markRollbackTargets } = require('./graph');
 
@@ -20,7 +20,7 @@ const BUSY_MESSAGE_TYPES = new Set([
   'operation', 'commit', 'continueOperation', 'resolveConflicts', 'abortOperation', 'branch',
   'stage', 'unstage', 'stageAll', 'unstageAll', 'discard', 'discardAll',
   'graphCheckout', 'graphCreateBranch', 'graphCreateTag', 'graphCherryPick',
-  'graphAmendMessage', 'graphRollback',
+  'graphAmendMessage', 'graphRollback', 'graphRevert',
 ]);
 
 function busyLabel(message) {
@@ -35,10 +35,14 @@ function busyLabel(message) {
       pullFrom: 'Pulling from branch',
       fetch: 'Fetching changes',
       push: 'Pushing changes',
+      publish: 'Publishing branch',
       resetToOrigin: 'Resetting branch to origin',
       stash: 'Stashing changes',
       popStash: 'Popping latest stash',
       popStashSelected: 'Popping stash',
+      viewStash: 'Opening stash',
+      applyStash: 'Applying stash',
+      createWorktree: 'Creating worktree',
     }[message.operation] ?? 'Running Git operation';
   }
   return 'Updating repository';
@@ -73,6 +77,7 @@ class RepositoryViewProvider {
 
   resolveWebviewView(view) {
     this.view = view;
+    this.hasRendered = false;
     this.log?.info('Repository view resolved.');
     view.webview.options = { enableScripts: true, localResourceRoots: [] };
     view.webview.onDidReceiveMessage((message) => this.receiveMessage(message));
@@ -109,7 +114,7 @@ class RepositoryViewProvider {
           : `Failed to handle ${message.type}.`,
         error,
       );
-      await vscode.window.showErrorMessage(
+      void vscode.window.showErrorMessage(
         `Better Source Control failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
@@ -168,6 +173,13 @@ class RepositoryViewProvider {
       const bRank = ranks.get(b.rootUri.fsPath) ?? Number.MAX_SAFE_INTEGER;
       return aRank - bRank || repositoryName(a).localeCompare(repositoryName(b));
     });
+    if (!this.hasRendered) {
+      await this.view.webview.postMessage({
+        type: 'render', loading: true,
+        repositories: openRepositories.map((repository) => ({ name: repositoryName(repository) })),
+      });
+      this.hasRendered = true;
+    }
     if (openRepositories.length === 1) {
       const [repository] = openRepositories;
       const id = repository.rootUri.fsPath;
@@ -223,14 +235,21 @@ class RepositoryViewProvider {
       const repository = this.repository(id);
       if (!repository || !changedFileCount(repository.state)) continue;
       this.statsInFlight = id;
-      const stats = await this.computeStats(repository);
+      let stats;
+      try {
+        stats = await this.computeStats(repository);
+      } catch (error) {
+        this.log?.error(`Failed to load change stats for ${repositoryName(repository)}.`, error);
+        stats = { insertions: 0, deletions: 0, files: { staged: {}, unstaged: {} }, incomplete: true };
+      }
       this.statsInFlight = undefined;
-      if (this.dirtyStats.has(id)) continue;
+      if (this.dirtyStats.has(id) || this.repository(id) !== repository) continue;
       this.stats.set(id, stats);
       await this.view?.webview.postMessage({
         type: 'stats',
         repositoryId: id,
-        statsLabel: formatChangeStats(changedFileCount(repository.state), stats.insertions, stats.deletions),
+        statsLabel: stats.incomplete ? `${changedFileCount(repository.state)} files · stats incomplete`
+          : formatChangeStats(changedFileCount(repository.state), stats.insertions, stats.deletions),
         ...stats,
       });
     }
@@ -310,9 +329,9 @@ class RepositoryViewProvider {
     await this.loadGraph();
   }
 
-  async graphRefNames(repository, refs) {
-    if (this.graph.scope.kind === 'all') return refs.map(fullRefName).filter(Boolean);
-    if (this.graph.scope.kind === 'ref') return [this.graph.scope.ref];
+  async graphRefNames(repository, refs, graph) {
+    if (graph.scope.kind === 'all') return refs.map(fullRefName).filter(Boolean);
+    if (graph.scope.kind === 'ref') return [graph.scope.ref];
     const head = repository.state.HEAD;
     if (!head?.name) return head?.commit ? [head.commit] : undefined;
     const names = [`refs/heads/${head.name}`];
@@ -332,11 +351,14 @@ class RepositoryViewProvider {
       return;
     }
     const requestId = this.graphRequestId = (this.graphRequestId ?? 0) + 1;
+    const current = () => requestId === this.graphRequestId && this.graph === graph;
     graph.loading = true;
     graph.error = undefined;
     await this.postGraph();
+    if (!current()) return;
     try {
       const refs = await repository.getRefs({ sort: 'committerdate' });
+      if (!current()) return;
       if (!repository.state.HEAD?.commit) {
         graph.commits = [];
         graph.refs = [];
@@ -346,13 +368,14 @@ class RepositoryViewProvider {
         await this.postGraph();
         return;
       }
-      const refNames = await this.graphRefNames(repository, refs);
+      const refNames = await this.graphRefNames(repository, refs, graph);
+      if (!current()) return;
       const result = await repository.log({
         maxEntries: graph.limit + 1,
         refNames,
         shortStats: true,
       });
-      if (requestId !== this.graphRequestId || this.graph !== graph) return;
+      if (!current()) return;
       const commits = result.slice(0, graph.limit).map((commit) => ({
         hash: commit.hash,
         subject: commit.message.split(/\r?\n/, 1)[0],
@@ -382,7 +405,7 @@ class RepositoryViewProvider {
       graph.outdated = false;
       await this.postGraph();
     } catch (error) {
-      if (requestId !== this.graphRequestId || this.graph !== graph) return;
+      if (!current()) return;
       graph.loading = false;
       graph.error = error instanceof Error ? error.message : String(error);
       await this.postGraph();
@@ -394,7 +417,10 @@ class RepositoryViewProvider {
   }
 
   async selectGraphScope(repository) {
+    const graph = this.graph;
+    if (!graph || graph.repositoryId !== repository.rootUri.fsPath) return;
     const refs = await repository.getRefs({ sort: 'committerdate' });
+    if (this.graph !== graph) return;
     const choices = [
       { label: 'Auto', description: 'Current branch, upstream, and branch base', value: { kind: 'auto', label: 'Auto' } },
       { label: 'All References', description: 'All branches and tags', value: { kind: 'all', label: 'All' } },
@@ -406,17 +432,18 @@ class RepositoryViewProvider {
     ];
     const picked = await vscode.window.showQuickPick(choices, {
       title: `Filter ${repositoryName(repository)} Commit Graph`,
-      placeHolder: this.graph?.scope.label,
+      placeHolder: graph.scope.label,
     });
-    if (!picked || this.graph?.repositoryId !== repository.rootUri.fsPath) return;
-    this.graph.scope = picked.value;
-    this.graph.limit = GRAPH_PAGE_SIZE;
-    this.graph.selectedHash = undefined;
-    this.graph.details = undefined;
+    if (!picked || this.graph !== graph) return;
+    graph.scope = picked.value;
+    graph.limit = GRAPH_PAGE_SIZE;
+    graph.selectedHash = undefined;
+    graph.details = undefined;
     await this.loadGraph();
   }
 
   async selectGraphRepository() {
+    const graph = this.graph;
     const picked = await vscode.window.showQuickPick(
       this.api.repositories.map((repository) => ({
         label: repositoryName(repository),
@@ -425,24 +452,30 @@ class RepositoryViewProvider {
       })),
       {
         title: 'Choose Repository for Commit Graph',
-        placeHolder: this.graph?.repositoryName,
+        placeHolder: graph?.repositoryName,
       },
     );
-    if (picked) await this.showGraph(picked.repository);
+    if (picked && this.graph === graph) await this.showGraph(picked.repository);
   }
 
   async selectGraphCommit(repository, hash) {
-    const commit = this.graphCommit(hash);
+    const graph = this.graph;
+    if (!graph || graph.repositoryId !== repository.rootUri.fsPath) return;
+    const commit = graph.commits.find((item) => item.hash === hash);
     if (!commit) return;
-    if (this.graph.selectedHash === hash) {
-      this.graph.selectedHash = undefined;
-      this.graph.details = undefined;
+    const requestId = this.graphDetailsRequestId = (this.graphDetailsRequestId ?? 0) + 1;
+    const current = () => this.graph === graph && this.graphDetailsRequestId === requestId
+      && graph.selectedHash === hash;
+    if (graph.selectedHash === hash) {
+      graph.selectedHash = undefined;
+      graph.details = undefined;
       await this.postGraph();
       return;
     }
-    this.graph.selectedHash = hash;
-    this.graph.details = { loading: true, hash };
+    graph.selectedHash = hash;
+    graph.details = { loading: true, hash };
     await this.postGraph();
+    if (!current()) return;
     try {
       const parent = commit.parents[0];
       const changes = parent
@@ -450,8 +483,8 @@ class RepositoryViewProvider {
         : await repository.diffBetweenWithStats2(
           `${await git.emptyTreeHash(repository, { gitPath: this.api.git.path })}..${hash}`,
         );
-      if (this.graph?.selectedHash !== hash) return;
-      this.graph.details = {
+      if (!current()) return;
+      graph.details = {
         hash,
         files: changes.map((change) => {
           const relativePath = path.relative(repository.rootUri.fsPath, change.uri.fsPath);
@@ -470,13 +503,14 @@ class RepositoryViewProvider {
         }),
       };
     } catch (error) {
-      this.graph.details = {
+      if (!current()) return;
+      graph.details = {
         hash,
         error: error instanceof Error ? error.message : String(error),
         files: [],
       };
     }
-    await this.postGraph();
+    if (current()) await this.postGraph();
   }
 
   async compareGraphCommit(repository, commit, mode) {
@@ -505,17 +539,20 @@ class RepositoryViewProvider {
       await vscode.window.showInformationMessage('No comparison reference is available.');
       return;
     }
-    const changes = await repository.diffBetweenWithStats(ref, commit.hash);
+    const changes = await repository.diffBetweenWithStats2(`${ref}..${commit.hash}`);
     const picked = await vscode.window.showQuickPick(changes.map((change) => ({
       label: path.relative(repository.rootUri.fsPath, change.uri.fsPath),
       description: `+${change.insertions} −${change.deletions}`,
       change,
     })), { title: `Changes Between ${ref.replace(/^refs\/(heads|remotes|tags)\//, '')} and ${commit.hash.slice(0, 8)}` });
     if (!picked) return;
+    const badge = statusBadge(picked.change.status);
+    const original = picked.change.originalUri ?? picked.change.uri;
+    const renamed = picked.change.renameUri ?? picked.change.uri;
     await vscode.commands.executeCommand(
       'vscode.diff',
-      this.api.toGitUri(picked.change.uri, ref),
-      this.api.toGitUri(picked.change.uri, commit.hash),
+      badge === 'A' ? emptyUri(original) : this.api.toGitUri(original, ref),
+      badge === 'D' ? emptyUri(renamed) : this.api.toGitUri(renamed, commit.hash),
       `${picked.label} (${ref.replace(/^refs\/(heads|remotes|tags)\//, '')} ↔ ${commit.hash.slice(0, 8)})`,
     );
   }
@@ -555,9 +592,13 @@ class RepositoryViewProvider {
   }
 
   async rollbackGraphCommit(repository, commit) {
-    const head = repository.state.HEAD;
-    if (repository.state.rebaseCommit || repository.state.mergeChanges.length) {
-      await vscode.window.showInformationMessage('Finish or abort the current merge or rebase before rolling back.');
+    const head = {
+      name: repository.state.HEAD?.name,
+      commit: repository.state.HEAD?.commit,
+    };
+    if (await git.operationState(repository, { gitPath: this.api.git.path })
+      || repository.state.mergeChanges.length) {
+      await vscode.window.showInformationMessage('Resolve the current Git operation or conflicts before rolling back.');
       return;
     }
     let mergeBase;
@@ -595,14 +636,29 @@ class RepositoryViewProvider {
       },
       action,
     );
-    if (confirmed === action
-      && await git.rollback(repository, commit.hash, picked.mode, { gitPath: this.api.git.path })) {
+    if (confirmed !== action) return;
+    const currentHead = repository.state.HEAD;
+    if (currentHead?.name !== head.name || currentHead?.commit !== head.commit
+      || await git.operationState(repository, { gitPath: this.api.git.path })
+      || repository.state.mergeChanges.length) {
+      await vscode.window.showInformationMessage('HEAD or the Git operation changed before rollback.');
+      return;
+    }
+    if (await git.rollback(repository, commit.hash, picked.mode, {
+      gitPath: this.api.git.path,
+      expectedHead: head,
+    })) {
       await this.loadGraph();
     }
   }
 
   async amendGraphCommitMessage(repository, commit) {
-    const head = repository.state.HEAD;
+    const head = {
+      name: repository.state.HEAD?.name,
+      commit: repository.state.HEAD?.commit,
+      upstream: repository.state.HEAD?.upstream,
+      ahead: repository.state.HEAD?.ahead,
+    };
     if (!head?.commit || head.commit !== commit.hash) {
       await vscode.window.showInformationMessage('Only the current commit message can be amended.');
       return;
@@ -628,13 +684,17 @@ class RepositoryViewProvider {
       );
       if (confirmed !== action) return;
     }
-    if (repository.state.HEAD?.commit !== commit.hash) {
+    if (repository.state.HEAD?.commit !== head.commit || repository.state.HEAD?.name !== head.name
+      || await git.operationState(repository, { gitPath: this.api.git.path })
+      || repository.state.mergeChanges.length) {
       await vscode.window.showInformationMessage('HEAD changed before the commit could be amended.');
       return;
     }
     const noVerify = vscode.workspace.getConfiguration('gitChangeStats')
       .get('showNoVerifyButton', false) && this.noVerify.has(repository.rootUri.fsPath);
-    if (await git.amendMessage(repository, message, { noVerify, gitPath: this.api.git.path })) {
+    if (await git.amendMessage(repository, message, {
+      noVerify, gitPath: this.api.git.path, expectedHead: { name: head.name, commit: head.commit },
+    })) {
       this.graph.selectedHash = undefined;
       this.graph.details = undefined;
       await this.loadGraph();
@@ -645,6 +705,11 @@ class RepositoryViewProvider {
     if (message.type === 'ready') {
       await this.refresh();
       await this.postGraph();
+      await this.view?.webview.postMessage({
+        type: 'state',
+        busy: [...this.busyRepositories],
+        generating: [...this.generating],
+      });
       return;
     }
     const repository = this.repository(message.repositoryId);
@@ -731,6 +796,12 @@ class RepositoryViewProvider {
         await vscode.env.clipboard.writeText(commit.message);
         return;
       }
+      if (message.type === 'graphCopyRemoteLink' && commit) {
+        const remote = githubRepository(repository);
+        if (remote) await vscode.env.clipboard.writeText(`${remote.url}/commit/${commit.hash}`);
+        else await vscode.window.showInformationMessage('This repository has no GitHub remote.');
+        return;
+      }
       if (message.type === 'graphCheckout' && commit) {
         const action = 'Checkout Detached';
         const picked = await vscode.window.showWarningMessage(
@@ -760,15 +831,50 @@ class RepositoryViewProvider {
         return;
       }
       if (message.type === 'graphCherryPick' && commit) {
+        const head = {
+          name: repository.state.HEAD?.name,
+          commit: repository.state.HEAD?.commit,
+        };
         const action = 'Cherry Pick';
         const picked = await vscode.window.showWarningMessage(
-          `Cherry-pick ${commit.hash.slice(0, 8)} onto ${repository.state.HEAD?.name ?? 'HEAD'}?`,
+          `Cherry-pick ${commit.hash.slice(0, 8)} onto ${head.name ?? 'HEAD'}?`,
           { modal: true, detail: commit.subject },
           action,
         );
-        if (picked === action && await git.cherryPick(repository, commit.hash, { gitPath: this.api.git.path })) {
+        if (picked === action && await git.cherryPick(repository, commit.hash, {
+          gitPath: this.api.git.path, expectedHead: head,
+        })) {
           await this.loadGraph();
         }
+        return;
+      }
+      if (message.type === 'graphRevert' && commit?.parents.length === 1) {
+        const head = {
+          name: repository.state.HEAD?.name,
+          commit: repository.state.HEAD?.commit,
+        };
+        if (!head?.commit || await git.operationState(repository, { gitPath: this.api.git.path })
+          || repository.state.mergeChanges.length) {
+          await vscode.window.showInformationMessage('Resolve the current Git operation or conflicts before reverting.');
+          return;
+        }
+        const action = 'Revert Commit';
+        const picked = await vscode.window.showWarningMessage(
+          `Revert ${commit.hash.slice(0, 8)} on ${head.name ?? 'HEAD'}?`,
+          { modal: true, detail: commit.subject },
+          action,
+        );
+        if (picked !== action) return;
+        if (repository.state.HEAD?.commit !== head.commit
+          || repository.state.HEAD?.name !== head.name
+          || await git.operationState(repository, { gitPath: this.api.git.path })
+          || repository.state.mergeChanges.length) {
+          await vscode.window.showInformationMessage('HEAD or the Git operation changed before revert.');
+          return;
+        }
+        if (await git.revertCommit(repository, commit.hash, {
+          gitPath: this.api.git.path, expectedHead: head,
+        })) await this.loadGraph();
         return;
       }
       if (message.type === 'graphAmendMessage' && commit?.hash === this.graph.head) {
@@ -833,16 +939,19 @@ class RepositoryViewProvider {
         .get('showNoVerifyButton', false) && this.noVerify.has(message.repositoryId),
       gitPath: this.api.git.path,
     };
-    if (message.type === 'continueOperation' && ['merge', 'rebase'].includes(message.operation)) {
+    if (message.type === 'continueOperation' && ['merge', 'rebase', 'cherry-pick', 'revert'].includes(message.operation)) {
       await git.continueOperation(repository, message.operation, message.message, operationOptions);
     } else if (message.type === 'resolveConflicts'
-      && ['merge', 'rebase'].includes(message.operation)
+      && ['merge', 'rebase', 'cherry-pick', 'revert'].includes(message.operation)
       && repository.state.mergeChanges.length) {
       await ai.resolveConflicts(repository);
       await this.refresh();
-    } else if (message.type === 'abortOperation' && ['merge', 'rebase'].includes(message.operation)) {
+    } else if (message.type === 'abortOperation' && ['merge', 'rebase', 'cherry-pick', 'revert'].includes(message.operation)) {
       await git.abortOperation(repository, message.operation, operationOptions);
-    } else if (message.type === 'operation' && ['fetch', 'pullMerge', 'pullRebase', 'pullFrom', 'push', 'resetToOrigin', 'stash', 'popStashSelected', 'popStash'].includes(message.operation)) {
+    } else if (message.type === 'operation' && [
+      'fetch', 'pullMerge', 'pullRebase', 'pullFrom', 'push', 'publish', 'resetToOrigin',
+      'stash', 'popStashSelected', 'popStash', 'viewStash', 'applyStash', 'createWorktree',
+    ].includes(message.operation)) {
       await git[message.operation](repository, operationOptions);
     } else if (message.type === 'commit') {
       if (await git.commit(repository, message.message, operationOptions)) {
@@ -869,7 +978,7 @@ class RepositoryViewProvider {
           });
         }
       } catch (error) {
-        await vscode.window.showErrorMessage(
+        void vscode.window.showErrorMessage(
           `Commit message generation failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       } finally {
@@ -915,19 +1024,23 @@ class RepositoryViewProvider {
   }
 
   async repositoryData(repository) {
-    const stats = this.stats.get(repository.rootUri.fsPath);
+    const id = repository.rootUri.fsPath;
+    const stats = this.dirtyStats.has(id) || this.statsInFlight === id
+      ? undefined : this.stats.get(id);
     const isExpanded = this.expanded.has(repository.rootUri.fsPath);
     const files = changedFileCount(repository.state);
     const operation = await git.operationState(repository, { gitPath: this.api.git?.path });
+    const hiddenUntracked = vscode.workspace.getConfiguration('git', repository.rootUri)
+      .get('untrackedChanges', 'mixed') === 'hidden';
     const stagedFiles = isExpanded
-      ? await this.fileData(repository, 'staged', repository.state.indexChanges)
+      ? this.fileData(repository, 'staged', repository.state.indexChanges, stats)
       : [];
     const workingFiles = isExpanded
-      ? await this.fileData(repository, 'unstaged', [
+      ? this.fileData(repository, 'unstaged', [
           ...repository.state.mergeChanges,
           ...repository.state.workingTreeChanges,
           ...repository.state.untrackedChanges,
-        ])
+        ], stats)
       : [];
 
     const showNoVerifyButton = vscode.workspace.getConfiguration('gitChangeStats')
@@ -936,13 +1049,16 @@ class RepositoryViewProvider {
       id: repository.rootUri.fsPath,
       name: repositoryName(repository),
       branch: repository.state.HEAD?.name ?? 'detached HEAD',
+      publishable: Boolean(repository.state.HEAD?.name && !repository.state.HEAD?.upstream),
       ahead: repository.state.HEAD?.ahead ?? 0,
       behind: repository.state.HEAD?.behind ?? 0,
       files,
-      expandable: Boolean(files || operation),
+      expandable: Boolean(files || operation || hiddenUntracked),
       hasConflicts: repository.state.mergeChanges.length > 0,
-      statsLabel: stats ? formatChangeStats(files, stats.insertions, stats.deletions) : files ? String(files) : '',
+      statsLabel: stats?.incomplete ? `${files} files · stats incomplete`
+        : stats ? formatChangeStats(files, stats.insertions, stats.deletions) : files ? String(files) : '',
       statsReady: Boolean(stats),
+      statsIncomplete: Boolean(stats?.incomplete),
       insertions: stats?.insertions ?? 0,
       deletions: stats?.deletions ?? 0,
       stagedCount: uniqueChanges(repository.state.indexChanges).length,
@@ -953,44 +1069,24 @@ class RepositoryViewProvider {
       operationMessage: operation === 'rebase'
         ? repository.state.rebaseCommit?.message ?? ''
         : operation === 'merge' ? repository.inputBox.value : '',
+      hiddenUntracked,
       staged: this.viewMode === 'tree' ? buildFileTree(stagedFiles) : stagedFiles,
       unstaged: this.viewMode === 'tree' ? buildFileTree(workingFiles) : workingFiles,
     };
   }
 
   async computeStats(repository) {
-    const [working, staged] = await Promise.all([
-      repository.diffWithHEADShortStats().catch(emptyStats),
-      repository.diffIndexWithHEADShortStats().catch(emptyStats),
-    ]);
-    const untrackedInsertions = (
-      await Promise.all(
-        uniqueChanges(repository.state.untrackedChanges).map((change) =>
-          vscode.workspace.fs.readFile(change.uri).then(countTextLines, () => 0),
-        ),
-      )
-    ).reduce((total, lines) => total + lines, 0);
-    return {
-      insertions: working.insertions + staged.insertions + untrackedInsertions,
-      deletions: working.deletions + staged.deletions,
-    };
+    return collectStats(repository, { gitPath: this.api.git.path });
   }
 
-  async fileData(repository, kind, changes) {
-    return Promise.all(
-      uniqueChanges(changes)
-        .sort((a, b) => a.uri.fsPath.localeCompare(b.uri.fsPath))
-        .map(async (change) => {
+  fileData(repository, kind, changes, stats) {
+    return uniqueChanges(changes)
+      .sort((a, b) => a.uri.fsPath.localeCompare(b.uri.fsPath))
+      .map((change) => {
           const relativePath = path.relative(repository.rootUri.fsPath, change.uri.fsPath);
-          let stats = emptyStats();
-          if (kind === 'unstaged' && repository.state.untrackedChanges.some(sameUri(change))) {
-            stats = await vscode.workspace.fs.readFile(change.uri)
-              .then((bytes) => ({ insertions: countTextLines(bytes), deletions: 0 }))
-              .catch(emptyStats);
-          } else {
-            const method = kind === 'staged' ? 'diffIndexWithHEADShortStats' : 'diffWithHEADShortStats';
-            stats = await repository[method](relativePath).catch(emptyStats);
-          }
+          const entries = stats?.files?.[kind];
+          const count = entries && Object.hasOwn(entries, relativePath)
+            ? entries[relativePath] : undefined;
           const badge = statusBadge(change.status);
           return {
             type: 'file',
@@ -1001,11 +1097,10 @@ class RepositoryViewProvider {
             badge,
             canOpen: badge !== 'D',
             canDiscard: kind === 'unstaged' && !repository.state.mergeChanges.some(sameUri(change)),
-            insertions: stats.insertions,
-            deletions: stats.deletions,
+            insertions: count?.insertions,
+            deletions: count?.deletions,
           };
-        }),
-    );
+        });
   }
 
   dispose() {
@@ -1055,10 +1150,6 @@ function githubRepository(repository) {
       }
     }
   }
-}
-
-function emptyStats() {
-  return { insertions: 0, deletions: 0 };
 }
 
 function sameUri(target) {
@@ -1177,6 +1268,7 @@ function html() {
     .menu-separator { height: 1px; margin: 4px 6px; background: var(--vscode-menu-separatorBackground, var(--vscode-menu-border, var(--vscode-widget-border, transparent))); }
     .details { margin-left: 0; padding: 2px 4px 4px 5px; border-left: 1px solid var(--vscode-tree-indentGuidesStroke); }
     .commit { display: grid; grid-template-columns: minmax(0, 1fr) 28px 28px; gap: 4px; margin: 2px 0 6px; }
+    .commit.operation-blocked { grid-template-columns: minmax(0, 1fr) 28px 28px 28px; }
     textarea { width: 100%; min-height: 28px; max-height: 78px; resize: vertical; padding: 4px 6px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; outline: none; color: var(--vscode-input-foreground); background: var(--vscode-input-background); }
     textarea:focus { border-color: var(--vscode-focusBorder); }
     .commit-button { display: grid; place-items: center; padding: 2px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 4px; cursor: pointer; color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
@@ -1220,7 +1312,7 @@ function html() {
     .graph-header.collapsed { cursor: pointer; }
     .graph-header.collapsed:focus-visible { outline: 1px solid var(--vscode-list-focusOutline); outline-offset: -1px; }
     .graph-title { flex: none; font-size: 11px; font-weight: 700; text-transform: uppercase; }
-    .graph-repo { min-width: 0; height: 22px; padding: 0 4px; border: 0; border-radius: 3px; overflow: hidden; color: var(--vscode-descriptionForeground); background: transparent; cursor: pointer; text-overflow: ellipsis; white-space: nowrap; }
+    .graph-repo { min-width: 0; height: 22px; padding: 0 4px; border: 0; border-radius: 3px; overflow: hidden; color: var(--vscode-descriptionForeground); background: transparent; cursor: pointer; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
     .graph-repo:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
     .graph-outdated { padding: 1px 4px; border-radius: 3px; color: var(--vscode-editorWarning-foreground); font-size: 10px; text-transform: uppercase; }
     .graph-scope { max-width: 110px; height: 20px; padding: 0 6px; border: 0; border-radius: 10px; overflow: hidden; color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); cursor: pointer; text-overflow: ellipsis; white-space: nowrap; }
@@ -1250,7 +1342,7 @@ function html() {
     .graph-ref.tag { color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-charts-orange, #d18616) 20%, transparent); }
     .graph-ref.current { outline: 1px solid var(--vscode-focusBorder); }
     .graph-menu-action { width: 20px; display: flex; flex: none; visibility: hidden; }
-    .graph-row:hover .graph-menu-action, .graph-row:focus-within .graph-menu-action { visibility: visible; }
+    .graph-row:hover .graph-menu-action, .graph-row:focus-within .graph-menu-action, .graph-menu-action:has(:popover-open) { visibility: visible; }
     .graph-lane-extensions { position: absolute; inset: 22px 0 0; pointer-events: none; }
     .graph-lane-extension { position: absolute; inset-block: 0; width: 1px; transform: translateX(-.5px); }
     .graph-details { margin: 0 4px 0 15px; padding: 4px 5px 8px 8px; color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent); }
@@ -1280,11 +1372,16 @@ function html() {
     let model = { loading: true, repositories: [], expanded: [], viewMode: 'list' };
     let graph;
     let graphQuery = '';
-    let graphHeight = vscode.getState()?.graphHeight;
-    const messages = new Map();
+    const savedState = vscode.getState() || {};
+    let graphHeight = savedState.graphHeight;
+    const messages = new Map(Object.entries(savedState.drafts || {}));
     const generating = new Set();
+    const generatingDrafts = new Map();
+    const pendingGenerated = new Map();
     const busy = new Map();
     const collapsedGroups = new Set();
+    let composing = false;
+    let pendingRender = false;
     let draggedRepositoryId;
     let suppressToggleUntil = 0;
     // Lucide icon nodes: https://lucide.dev
@@ -1312,24 +1409,38 @@ function html() {
       play: [['path', { d: 'm7 4 13 8-13 8z' }]],
       abort: [['circle', { cx: '12', cy: '12', r: '9' }], ['path', { d: 'm9 9 6 6' }], ['path', { d: 'm15 9-6 6' }]],
       merge: [['circle', { cx: '18', cy: '18', r: '3' }], ['circle', { cx: '6', cy: '6', r: '3' }], ['path', { d: 'M6 21V9a9 9 0 0 0 9 9' }]],
+      cherryPick: [['circle', { cx: '6', cy: '6', r: '3' }], ['circle', { cx: '18', cy: '18', r: '3' }], ['path', { d: 'M6 9v5a4 4 0 0 0 4 4h5' }]],
       rebase: [['circle', { cx: '5', cy: '6', r: '3' }], ['path', { d: 'M12 6h5a2 2 0 0 1 2 2v7' }], ['path', { d: 'm15 9-3-3 3-3' }], ['circle', { cx: '19', cy: '18', r: '3' }], ['path', { d: 'M12 18H7a2 2 0 0 1-2-2V9' }], ['path', { d: 'm9 15 3 3-3 3' }]],
     };
 
     window.addEventListener('message', ({ data }) => {
       if (data.type === 'stats') {
-        const repository = model.repositories.find(({ id }) => id === data.repositoryId);
-        if (!repository) return;
-        Object.assign(repository, data, { statsReady: true });
+        updateStats(data);
+        return;
       } else if (data.type === 'render') {
         model = data;
       } else if (data.type === 'generatedMessage') {
-        messages.set(data.repositoryId, data.message);
+        applyGeneratedMessage(data);
+        return;
       } else if (data.type === 'committed') {
         messages.delete(data.repositoryId);
+        persistDrafts();
+        const input = repositorySection(data.repositoryId)?.querySelector('textarea');
+        if (input) input.value = '';
+        return;
       } else if (data.type === 'aiState') {
         data.generating ? generating.add(data.repositoryId) : generating.delete(data.repositoryId);
+        updateGenerating(data.repositoryId);
+        return;
       } else if (data.type === 'busy') {
         data.busy ? busy.set(data.repositoryId, data.label) : busy.delete(data.repositoryId);
+        updateBusy(data.repositoryId);
+        return;
+      } else if (data.type === 'state') {
+        busy.clear();
+        generating.clear();
+        for (const id of data.busy) busy.set(id, 'Updating repository');
+        for (const id of data.generating) generating.add(id);
       } else if (data.type === 'graph') {
         const scrollTop = graph?.repositoryId === data.graph?.repositoryId
           ? graphRoot.querySelector('.graph-list')?.scrollTop
@@ -1343,6 +1454,118 @@ function html() {
       }
       render();
     });
+
+    function repositorySection(id) {
+      return [...root.children].find((section) => section.dataset.repositoryId === id);
+    }
+
+    function persistDrafts() {
+      vscode.setState({ ...vscode.getState(), graphHeight, drafts: Object.fromEntries(messages) });
+    }
+
+    function applyGeneratedMessage(data) {
+      if (composing) {
+        pendingGenerated.set(data.repositoryId, data);
+        return;
+      }
+      const input = repositorySection(data.repositoryId)?.querySelector('textarea');
+      const draft = generatingDrafts.get(data.repositoryId);
+      generatingDrafts.delete(data.repositoryId);
+      if (draft === undefined && document.activeElement === input) return;
+      if (draft !== undefined && (messages.get(data.repositoryId) ?? input?.value ?? '') !== draft) return;
+      messages.set(data.repositoryId, data.message);
+      persistDrafts();
+      if (input) input.value = data.message;
+    }
+
+    function updateBusy(id) {
+      const section = repositorySection(id);
+      if (!section) return;
+      const label = busy.get(id);
+      section.inert = Boolean(label);
+      section.setAttribute('aria-busy', String(Boolean(label)));
+      const more = section.querySelector('.repo-actions [aria-haspopup="menu"]');
+      if (more) {
+        more.replaceChildren(icon(label ? 'loader' : 'more'));
+        more.querySelector('svg')?.classList.toggle('spinning', Boolean(label));
+        more.dataset.tooltip = label || 'More actions';
+        more.setAttribute('aria-label', label || 'More actions');
+      }
+      const input = section.querySelector('textarea');
+      const commit = section.querySelector('[data-action="commit"]');
+      if (commit) commit.disabled = Boolean(label) || !input?.value.trim();
+      const resume = section.querySelector('[data-action="continue"]');
+      const repository = model.repositories.find((item) => item.id === id);
+      if (resume) resume.disabled = Boolean(label) || Boolean(repository?.operationBlocked)
+        || repository?.operation === 'merge' && !input?.value.trim();
+    }
+
+    function updateGenerating(id) {
+      const generate = repositorySection(id)?.querySelector('[data-action="generate"]');
+      if (!generate) return;
+      const active = generating.has(id);
+      generate.replaceChildren(icon(active ? 'loader' : 'sparkles'));
+      generate.querySelector('svg')?.classList.toggle('spinning', active);
+      generate.dataset.tooltip = active ? 'Generating commit message' : 'Generate commit message';
+      generate.setAttribute('aria-label', generate.dataset.tooltip);
+      generate.disabled = active;
+    }
+
+    function updateStats(data) {
+      const repository = model.repositories.find(({ id }) => id === data.repositoryId);
+      if (!repository) return;
+      repository.statsLabel = data.statsLabel;
+      repository.statsReady = true;
+      repository.statsIncomplete = data.incomplete;
+      repository.insertions = data.insertions;
+      repository.deletions = data.deletions;
+      const section = repositorySection(data.repositoryId);
+      const badge = section?.querySelector('.repo-stats');
+      if (badge) {
+        badge.dataset.tooltip = data.statsLabel
+          + (repository.hasConflicts ? '\\nMerge conflicts present' : '');
+        badge.replaceChildren(el('span', 'repo-file-count', String(repository.files)
+          + (repository.hasConflicts ? '!' : '')));
+        if (data.incomplete) badge.append(el('span', 'stats-unavailable', '?'));
+        else badge.append(el('span', 'add', '+' + data.insertions), el('span', 'del', '-' + data.deletions));
+      }
+      for (const kind of ['staged', 'unstaged']) {
+        const visit = (nodes) => nodes.forEach((node) => {
+          if (node.type === 'folder') return visit(node.children);
+          const entries = data.files?.[kind];
+          const count = entries && Object.hasOwn(entries, node.relativePath)
+            ? entries[node.relativePath] : undefined;
+          node.insertions = count?.insertions;
+          node.deletions = count?.deletions;
+        });
+        visit(repository[kind]);
+      }
+      section?.querySelectorAll('.file[data-relative-path]').forEach((file) => {
+        const entries = data.files?.[file.dataset.kind];
+        const count = entries && Object.hasOwn(entries, file.dataset.relativePath)
+          ? entries[file.dataset.relativePath] : undefined;
+        setFileStats(file.querySelector('.stats'), count, true);
+      });
+      const details = section?.querySelector('.details');
+      const warning = details?.querySelector('.stats-warning');
+      if (data.incomplete && details && !warning) {
+        details.prepend(el('div', 'graph-meta stats-warning', 'Some line counts are unavailable.'));
+      } else if (!data.incomplete) warning?.remove();
+    }
+
+    function setFileStats(node, count, ready) {
+      if (!node) return;
+      node.replaceChildren();
+      if (!count) {
+        if (ready) {
+          node.append(el('span', 'stats-unavailable', '?'));
+          node.dataset.tooltip = 'Line counts unavailable';
+        }
+        return;
+      }
+      delete node.dataset.tooltip;
+      node.append(el('span', 'add', '+' + count.insertions), el('span', 'del', '−' + count.deletions));
+    }
 
     function el(tag, className, text) {
       const node = document.createElement(tag);
@@ -1453,10 +1676,23 @@ function html() {
     }
 
     function render() {
+      if (composing) {
+        pendingRender = true;
+        return;
+      }
+      pendingRender = false;
+      const active = document.activeElement;
+      const focusedRepo = active?.tagName === 'TEXTAREA'
+        ? active.closest('.repo')?.dataset.repositoryId : undefined;
+      const selection = focusedRepo
+        ? [active.selectionStart, active.selectionEnd, active.selectionDirection] : undefined;
+      const scrollTop = root.scrollTop;
       hideTooltip();
       root.replaceChildren();
       if (model.loading) {
-        root.append(el('div', 'empty', 'Loading repositories…'));
+        if (model.repositories.length) {
+          model.repositories.forEach((repository) => root.append(el('div', 'repo-row', repository.name)));
+        } else root.append(el('div', 'empty', 'Loading repositories…'));
         return;
       }
       if (model.error) {
@@ -1468,6 +1704,14 @@ function html() {
         return;
       }
       model.repositories.forEach((repository) => root.append(renderRepository(repository)));
+      root.scrollTop = scrollTop;
+      if (focusedRepo) {
+        const input = repositorySection(focusedRepo)?.querySelector('textarea');
+        if (input && !input.disabled && !input.closest('[inert]')) {
+          input.focus({ preventScroll: true });
+          input.setSelectionRange(...selection);
+        }
+      }
     }
 
     function clearDropIndicators() {
@@ -1484,6 +1728,7 @@ function html() {
       const expanded = model.expanded.includes(repository.id);
       const progressLabel = busy.get(repository.id);
       const section = el('section', 'repo' + (expanded ? ' expanded' : '') + (repository.expandable ? '' : ' clean'));
+      section.dataset.repositoryId = repository.id;
       const row = el('div', 'repo-row');
       row.draggable = true;
       row.addEventListener('dragstart', (event) => {
@@ -1534,10 +1779,15 @@ function html() {
         el('span', 'repo-name', repository.name),
       );
       if (repository.operation) {
-        const operationTitle = repository.operation === 'merge'
-          ? 'Merge in progress'
-          : 'Rebase in progress';
-        row.append(icon(repository.operation, 'icon repo-operation', operationTitle));
+        const operationTitle = repository.operation === 'cherry-pick'
+          ? 'Cherry-pick'
+          : repository.operation[0].toUpperCase() + repository.operation.slice(1);
+        row.append(icon(
+          repository.operation === 'cherry-pick' ? 'cherryPick'
+            : repository.operation === 'revert' ? 'undo' : repository.operation,
+          'icon repo-operation',
+          operationTitle + ' in progress',
+        ));
       }
       if (repository.behind || repository.ahead) {
         const sync = el('span', 'repo-sync');
@@ -1565,7 +1815,8 @@ function html() {
           String(repository.files) + (repository.hasConflicts ? '!' : ''),
         ));
         if (repository.statsReady) {
-          stats.append(
+          if (repository.statsIncomplete) stats.append(el('span', 'stats-unavailable', '?'));
+          else stats.append(
             el('span', 'add', '+' + repository.insertions),
             el('span', 'del', '-' + repository.deletions),
           );
@@ -1592,13 +1843,17 @@ function html() {
         menuItem('Pull and Merge', () => execute('pullMerge')),
         menuItem('Pull and Rebase', () => execute('pullRebase')),
         menuItem('Pull from…', () => execute('pullFrom')),
-        menuItem('Push', () => execute('push')),
+        menuItem(repository.publishable ? 'Publish Branch' : 'Push', () => execute(repository.publishable ? 'publish' : 'push')),
         menuSeparator(),
         menuItem('Reset Branch to Origin', () => execute('resetToOrigin')),
         menuSeparator(),
         menuItem('Stash Changes', () => execute('stash')),
+        menuItem('View Stash…', () => execute('viewStash')),
+        menuItem('Apply Stash…', () => execute('applyStash')),
         menuItem('Pop Stash…', () => execute('popStashSelected')),
         menuItem('Pop Latest Stash', () => execute('popStash')),
+        menuSeparator(),
+        menuItem('Create Worktree…', () => execute('createWorktree')),
       );
       const more = button(progressLabel ? 'loader' : 'more', progressLabel || 'More actions', () => {
         if (menu.matches(':popover-open')) {
@@ -1662,7 +1917,8 @@ function html() {
       }
       actions.append(
         button('pull', 'Pull and Merge', () => operation(repository, 'pullMerge')),
-        button('push', 'Push', () => operation(repository, 'push')),
+        button('push', repository.publishable ? 'Publish Branch' : 'Push',
+          () => operation(repository, repository.publishable ? 'publish' : 'push')),
         more,
         menu,
       );
@@ -1676,6 +1932,13 @@ function html() {
 
     function renderDetails(repository) {
       const details = el('div', 'details');
+      if (repository.hiddenUntracked) {
+        details.append(el('div', 'graph-meta', 'Untracked files are hidden by the Git setting.'));
+      }
+      if (repository.statsIncomplete) {
+        details.append(el('div', 'graph-meta stats-warning', 'Some line counts are unavailable.'));
+      }
+      if (!repository.files && !repository.operation) return details;
       const commit = el('div', 'commit');
       const progressLabel = busy.get(repository.id);
       const input = el('textarea');
@@ -1690,42 +1953,56 @@ function html() {
         : repository.operationMessage || '';
       input.addEventListener('input', () => {
         messages.set(repository.id, input.value);
+        persistDrafts();
+      });
+      input.addEventListener('compositionstart', () => { composing = true; });
+      input.addEventListener('compositionend', () => {
+        composing = false;
+        setTimeout(() => {
+          if (composing) return;
+          for (const generated of pendingGenerated.values()) applyGeneratedMessage(generated);
+          pendingGenerated.clear();
+          if (pendingRender) render();
+        }, 0);
       });
       input.addEventListener('keydown', (event) => {
-        if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') submit();
+        if (!repository.operation && (event.metaKey || event.ctrlKey) && event.key === 'Enter') submit();
       });
-      if (repository.operation === 'rebase') input.disabled = true;
+      if (repository.operation && repository.operation !== 'merge') input.disabled = true;
       if (repository.operation) {
-        const operationTitle = repository.operation[0].toUpperCase() + repository.operation.slice(1);
-        const resume = repository.operationBlocked
-          ? button(
-              progressLabel ? 'loader' : 'sparkles',
-              progressLabel || 'Resolve all conflicts with AI',
-              () => vscode.postMessage({
-                type: 'resolveConflicts',
-                repositoryId: repository.id,
-                operation: repository.operation,
-              }),
-              'commit-button ai-button',
-            )
-          : button(
-              progressLabel ? 'loader' : 'play',
-              progressLabel || 'Continue ' + repository.operation,
-              () => vscode.postMessage({
-                type: 'continueOperation',
-                repositoryId: repository.id,
-                operation: repository.operation,
-                message: input.value,
-              }),
-              'commit-button',
-            );
-        if (progressLabel) resume.querySelector('svg').classList.add('spinning');
-        resume.disabled = !repository.operationBlocked
-          && repository.operation === 'merge' && !input.value.trim();
+        const operationTitle = repository.operation === 'cherry-pick'
+          ? 'cherry-pick' : repository.operation;
+        const resume = button(
+          'play',
+          'Continue ' + operationTitle,
+          () => vscode.postMessage({
+            type: 'continueOperation',
+            repositoryId: repository.id,
+            operation: repository.operation,
+            message: input.value,
+          }),
+          'commit-button',
+        );
+        resume.dataset.action = 'continue';
+        resume.disabled = Boolean(progressLabel) || Boolean(repository.operationBlocked)
+          || repository.operation === 'merge' && !input.value.trim();
         input.addEventListener('input', () => {
-          resume.disabled = !repository.operationBlocked
-            && repository.operation === 'merge' && !input.value.trim();
+          resume.disabled = busy.has(repository.id) || Boolean(repository.operationBlocked)
+            || repository.operation === 'merge' && !input.value.trim();
         });
+        if (repository.operationBlocked) {
+          commit.classList.add('operation-blocked');
+          commit.append(button(
+            'sparkles',
+            'Resolve text conflicts with AI',
+            () => vscode.postMessage({
+              type: 'resolveConflicts',
+              repositoryId: repository.id,
+              operation: repository.operation,
+            }),
+            'commit-button ai-button',
+          ));
+        }
         commit.append(
           input,
           resume,
@@ -1745,25 +2022,35 @@ function html() {
         if (countFiles(repository.unstaged)) details.append(renderGroup(repository, 'unstaged', 'Changes'));
         return details;
       }
+      if (repository.hasConflicts) {
+        details.append(el('div', 'graph-meta', 'Resolve unmerged files manually, then stage them.'));
+        if (countFiles(repository.staged)) details.append(renderGroup(repository, 'staged', 'Staged'));
+        if (countFiles(repository.unstaged)) details.append(renderGroup(repository, 'unstaged', 'Changes'));
+        return details;
+      }
       const isGenerating = generating.has(repository.id);
       const generate = button(
         isGenerating ? 'loader' : 'sparkles',
         isGenerating ? 'Generating commit message' : 'Generate commit message',
-        () => post('generateMessage', repository),
+        () => {
+          generatingDrafts.set(repository.id, input.value);
+          post('generateMessage', repository);
+        },
         'commit-button ai-button',
       );
+      generate.dataset.action = 'generate';
       generate.disabled = isGenerating;
       if (isGenerating) generate.querySelector('svg').classList.add('spinning');
       const check = button(
-        progressLabel ? 'loader' : 'check',
-        progressLabel || (repository.stagedCount ? 'Commit staged changes' : 'Stage all changes and commit'),
+        'check',
+        repository.stagedCount ? 'Commit staged changes' : 'Stage all changes and commit',
         submit,
         'commit-button',
       );
-      if (progressLabel) check.querySelector('svg').classList.add('spinning');
+      check.dataset.action = 'commit';
       check.disabled = Boolean(progressLabel) || !input.value.trim();
       input.addEventListener('input', () => {
-        check.disabled = Boolean(progressLabel) || !input.value.trim();
+        check.disabled = busy.has(repository.id) || !input.value.trim();
       });
       function submit() {
         const message = input.value.trim();
@@ -1838,8 +2125,12 @@ function html() {
 
       const file = el('div', 'file');
       file.tabIndex = 0;
+      file.dataset.kind = kind;
+      file.dataset.relativePath = node.relativePath;
       file.addEventListener('click', () => filePost('diff', repository, kind, node));
-      file.addEventListener('keydown', (event) => event.key === 'Enter' && filePost('diff', repository, kind, node));
+      file.addEventListener('keydown', (event) => {
+        if (event.target === file && event.key === 'Enter') filePost('diff', repository, kind, node);
+      });
       const conflicted = node.badge === '!';
       const badge = el('span', 'badge badge-' + node.badge + (conflicted ? ' badge-conflict' : ''), node.badge);
       badge.dataset.tooltip = conflicted
@@ -1852,7 +2143,7 @@ function html() {
         file.append(directory);
       }
       const stats = el('span', 'stats');
-      stats.append(el('span', 'add', '+' + node.insertions), el('span', 'del', '−' + node.deletions));
+      setFileStats(stats, node.insertions === undefined ? undefined : node, repository.statsReady);
       const actions = el('span', 'file-actions');
       if (node.canOpen) {
         actions.append(button('file', 'Open File', () => filePost('open', repository, kind, node)));
@@ -1870,6 +2161,10 @@ function html() {
     }
 
     function renderGraph(scrollTop) {
+      const previousSearch = graphRoot.querySelector('.graph-search');
+      const searchFocused = document.activeElement === previousSearch;
+      const searchSelection = searchFocused
+        ? [previousSearch.selectionStart, previousSearch.selectionEnd] : undefined;
       hideTooltip();
       graphRoot.replaceChildren();
       const collapsed = !graph || graph.collapsed;
@@ -1953,9 +2248,9 @@ function html() {
       header.append(toolbar);
       const search = el('input', 'graph-search');
       search.type = 'search';
-      search.placeholder = 'Filter commits by message, author, ref, or hash';
+      search.placeholder = 'Filter loaded commits by message, author, ref, or hash';
       search.value = graphQuery;
-      search.setAttribute('aria-label', 'Filter commits');
+      search.setAttribute('aria-label', 'Filter loaded commits');
       const list = el('div', 'graph-list');
       list.setAttribute('role', 'listbox');
       list.setAttribute('aria-label', graph.repositoryName + ' commit history');
@@ -1967,6 +2262,10 @@ function html() {
       graphRoot.append(resizer, header, search, list);
       renderGraphList(list);
       if (scrollTop !== undefined) list.scrollTop = scrollTop;
+      if (searchFocused) {
+        search.focus({ preventScroll: true });
+        search.setSelectionRange(...searchSelection);
+      }
     }
 
     function setGraphHeight(value) {
@@ -1999,7 +2298,7 @@ function html() {
           .toLocaleLowerCase().includes(query);
       });
       if (!commits.length) {
-        list.append(el('div', 'graph-status', query ? 'No matching commits' : 'No commits found'));
+        list.append(el('div', 'graph-status', query ? 'No matching loaded commits' : 'No commits found'));
         return;
       }
       commits.forEach((commit) => {
@@ -2034,6 +2333,7 @@ function html() {
         if (!event.target.closest('button')) graphPost('graphOpen', commit);
       });
       row.addEventListener('keydown', (event) => {
+        if (event.target !== row) return;
         const rows = [...graphRoot.querySelectorAll('.graph-row')];
         const index = rows.indexOf(row);
         const target = event.key === 'ArrowDown' ? rows[index + 1]
@@ -2209,7 +2509,7 @@ function html() {
             if (!event.target.closest('button')) graphFilePost('graphFileDiff', commit, file);
           });
           row.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') graphFilePost('graphFileDiff', commit, file);
+            if (event.target === row && event.key === 'Enter') graphFilePost('graphFileDiff', commit, file);
           });
           row.append(
             el('span', 'badge badge-' + file.badge, file.badge),
@@ -2252,6 +2552,7 @@ function html() {
         graphPost(type, commit, extra);
       };
       const rewrite = [menuItem('Cherry Pick', action('graphCherryPick'))];
+      if (commit.parents.length === 1) rewrite.push(menuItem('Revert Commit…', action('graphRevert')));
       if (commit.hash === graph.head) {
         rewrite.push(menuItem('Amend Commit Message…', action('graphAmendMessage')));
       }
@@ -2274,6 +2575,7 @@ function html() {
         menuSeparator(),
         menuItem('Copy Commit Hash', action('graphCopyHash')),
         menuItem('Copy Commit Message', action('graphCopyMessage')),
+        menuItem('Copy Commit Remote Link', action('graphCopyRemoteLink')),
       );
       menu.addEventListener('keydown', (event) => {
         const items = [...menu.querySelectorAll('.menu-item')];

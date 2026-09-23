@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.0 — 2026-09-23
+
+### Added
+
+- Native branch picker, Publish Branch, stash review/apply, and worktree creation.
+- Copy Commit Remote Link for GitHub commits and single-parent commit reverts.
+- Cherry-pick and revert recovery, persisted commit drafts, custom AI model IDs, and opt-in bounded untracked-file prompt contents.
+- Cross-platform test workflow, F5 launch configuration, and an isolated VS Code host smoke test.
+
+### Fixed
+
+- Revalidate branch, commit, and operation state before destructive or history-changing actions; reset to the freshly fetched commit.
+- Restrict AI conflict staging to resolved text, tighten Claude permissions, and wait for cancellation before releasing repository activity.
+- Batch line statistics, bound untracked reads, and indicate unavailable counts.
+- Preserve typing focus and selection during updates; ignore stale graph results and align comparison diff endpoints.
+- Correct collapsed graph title alignment, disconnected graph lanes, and nested keyboard actions.
+
 ## 1.0.9 — 2026-08-24
 
 ### Fixed

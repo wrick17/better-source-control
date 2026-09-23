@@ -1,4 +1,7 @@
 .git/**
 .vscode/**
 test/**
+test-host/**
+scripts/**
+.github/**
 *.vsix

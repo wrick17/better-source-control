@@ -8,12 +8,18 @@ const load = Module._load;
 const executedCommands = [];
 const openedExternal = [];
 const authenticationRequests = [];
+const clipboardWrites = [];
+const informationMessages = [];
 let mergeEditor = false;
+let quickPickIndex = 0;
+let warningHandler;
+let errorHandler;
 let fullRefName;
 let githubRepository;
 let RepositoryViewProvider;
 let html;
 let git;
+let ai;
 let openDiff;
 try {
   Module._load = (request, parent, isMain) =>
@@ -27,11 +33,19 @@ try {
           },
           commands: { executeCommand: async (...args) => executedCommands.push(args) },
           env: {
-            clipboard: { writeText: async () => {} },
+            clipboard: { writeText: async (value) => clipboardWrites.push(value) },
             openExternal: async (uri) => openedExternal.push(uri.toString()),
           },
-          Uri: { parse: (value) => ({ toString: () => value }) },
-          window: { showErrorMessage: async () => {}, showInformationMessage: async () => {} },
+          Uri: {
+            parse: (value) => ({ toString: () => value }),
+            from: (value) => value,
+          },
+          window: {
+            showErrorMessage: (...args) => errorHandler?.(...args),
+            showInformationMessage: async (value) => informationMessages.push(value),
+            showQuickPick: async (choices) => choices[quickPickIndex],
+            showWarningMessage: async (...args) => warningHandler?.(...args),
+          },
           workspace: { getConfiguration: (section) => ({
             get: (key, fallback) => section === 'git' && key === 'mergeEditor'
               ? mergeEditor
@@ -41,6 +55,7 @@ try {
       : load(request, parent, isMain);
   ({ fullRefName, githubRepository, html, openDiff, RepositoryViewProvider } = require('../extension'));
   git = require('../git-operations');
+  ai = require('../ai-commit');
 } finally {
   Module._load = load;
 }
@@ -92,11 +107,11 @@ test('generates valid webview JavaScript', () => {
   assert.match(markup, /const nextTarget = event\.relatedTarget\?\.closest\?\.\('\[data-tooltip\]'\)/);
   assert.match(markup, /\.file-name \{ flex: none; \}/);
   assert.match(markup, /directory\.dataset\.tooltip = (node|file)\.directory/);
-  assert.match(markup, /Resolve all conflicts with AI/);
+  assert.match(markup, /Resolve text conflicts with AI/);
   assert.match(markup, /type: 'resolveConflicts'/);
   assert.match(markup, /\? 'Conflicted'/);
   assert.match(markup, /repository\.hasConflicts \? '!' : ''/);
-  assert.match(markup, /icon\(repository\.operation, 'icon repo-operation'/);
+  assert.match(markup, /repository\.operation === 'cherry-pick' \? 'cherryPick'/);
   assert.match(markup, /expanded && repository\.expandable/);
   assert.match(markup, /section\.inert = Boolean\(progressLabel\)/);
   assert.match(markup, /section\.setAttribute\('aria-busy'/);
@@ -153,6 +168,35 @@ test('resolves GitHub remotes and opens commits and linked author profiles', asy
   assert.deepEqual(authenticationRequests, [['github', ['repo'], { createIfNone: true }]]);
   assert.equal(request[0], 'https://api.github.com/repos/acme/project/commits/abc123');
   assert.equal(request[1].headers.Authorization, 'Bearer token');
+});
+
+test('copies the selected GitHub commit link and leaves the clipboard alone without a GitHub remote', async () => {
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: {
+      HEAD: { upstream: { remote: 'upstream' } },
+      remotes: [
+        { name: 'origin', fetchUrl: 'https://github.com/fallback/project.git' },
+        { name: 'upstream', fetchUrl: 'git@github.com:acme/project.git' },
+      ],
+    },
+  };
+  const commit = { hash: 'abc123' };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { git: {}, repositories: [repository] },
+    graph: { repositoryId: '/repo', commits: [commit] },
+    refresh: async () => {},
+  });
+  clipboardWrites.length = 0;
+  informationMessages.length = 0;
+
+  await provider.handleMessage({ type: 'graphCopyRemoteLink', repositoryId: '/repo', hash: commit.hash });
+  assert.deepEqual(clipboardWrites, ['https://github.com/acme/project/commit/abc123']);
+
+  repository.state.remotes = [{ name: 'origin', fetchUrl: 'https://gitlab.com/acme/project.git' }];
+  await provider.handleMessage({ type: 'graphCopyRemoteLink', repositoryId: '/repo', hash: commit.hash });
+  assert.deepEqual(clipboardWrites, ['https://github.com/acme/project/commit/abc123']);
+  assert.deepEqual(informationMessages, ['This repository has no GitHub remote.']);
 });
 
 test('exposes separate AI controls with a shared provider', () => {
@@ -225,8 +269,9 @@ test('blocks merge and rebase continuation only while conflicts remain', async (
     api: { git: { path: '/git' } },
     expanded: new Set(),
     stats: new Map(),
+    dirtyStats: new Set(),
     viewMode: 'list',
-    fileData: async () => [],
+    fileData: () => [],
   });
   const operationState = git.operationState;
   git.operationState = async () => 'rebase';
@@ -381,10 +426,11 @@ test('loads commit details from its parent instead of the working tree', async (
   const root = { hash: 'root', parents: [] };
   const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
     api: { git: { path: '/git' } },
-    graph: { commits: [commit, root] },
+    graph: { repositoryId: '/repo', commits: [commit, root] },
     postGraph: async () => {},
   });
   const repository = {
+    rootUri: { fsPath: '/repo' },
     diffBetweenWithStats: async (...args) => { calls.push(args); return []; },
     diffBetweenWithStats2: async (...args) => { calls.push(args); return []; },
   };
@@ -399,4 +445,217 @@ test('loads commit details from its parent instead of the working tree', async (
   }
 
   assert.deepEqual(calls, [['parent', 'child'], ['empty..root']]);
+});
+
+test('ignores failed commit details from an older selection', async () => {
+  let rejectOld;
+  let resolveNew;
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    diffBetweenWithStats: (parent) => new Promise((resolve, reject) => {
+      if (parent === 'parent-a') rejectOld = reject;
+      else resolveNew = resolve;
+    }),
+  };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    graph: { repositoryId: '/repo', commits: [
+      { hash: 'a', parents: ['parent-a'] },
+      { hash: 'b', parents: ['parent-b'] },
+    ] },
+    postGraph: async () => {},
+  });
+
+  const old = provider.selectGraphCommit(repository, 'a');
+  await Promise.resolve();
+  const current = provider.selectGraphCommit(repository, 'b');
+  await Promise.resolve();
+  resolveNew([]);
+  await current;
+  rejectOld(new Error('stale failure'));
+  await old;
+
+  assert.deepEqual(provider.graph.details, { hash: 'b', files: [] });
+});
+
+test('renders changed files from cached batch stats without per-file Git calls', async () => {
+  const change = {
+    uri: { fsPath: '/repo/file.txt', toString: () => 'file:///repo/file.txt' },
+    status: 5,
+  };
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: {
+      HEAD: { name: 'feature' }, indexChanges: [], mergeChanges: [],
+      workingTreeChanges: [change], untrackedChanges: [],
+    },
+    diffWithHEADShortStats: () => { throw new Error('per-file diff called'); },
+  };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { git: { path: '/git' } },
+    expanded: new Set(['/repo']), dirtyStats: new Set(), stats: new Map(), viewMode: 'list',
+  });
+  const operationState = git.operationState;
+  git.operationState = async () => undefined;
+  try {
+    const initial = await provider.repositoryData(repository);
+    assert.equal(initial.unstaged[0].insertions, undefined);
+    assert.equal(initial.publishable, true);
+    provider.stats.set('/repo', {
+      insertions: 3, deletions: 1, files: { staged: {}, unstaged: { 'file.txt': { insertions: 3, deletions: 1 } } },
+      incomplete: false,
+    });
+    const complete = await provider.repositoryData(repository);
+    assert.deepEqual(
+      [complete.unstaged[0].insertions, complete.unstaged[0].deletions],
+      [3, 1],
+    );
+  } finally {
+    git.operationState = operationState;
+  }
+});
+
+test('compares endpoint snapshots and uses original and renamed file paths', async () => {
+  const original = { fsPath: '/repo/old.txt' };
+  const renamed = { fsPath: '/repo/new.txt' };
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: { HEAD: { upstream: { remote: 'origin', name: 'main' } } },
+    diffBetweenWithStats2: async (range) => {
+      assert.equal(range, 'refs/remotes/origin/main..target');
+      return [{ uri: original, originalUri: original, renameUri: renamed, status: 3,
+        insertions: 1, deletions: 1 }];
+    },
+  };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { toGitUri: (uri, ref) => ({ path: uri.fsPath, ref }) },
+  });
+  executedCommands.length = 0;
+  quickPickIndex = 0;
+
+  await provider.compareGraphCommit(repository, { hash: 'target' }, 'remote');
+
+  assert.deepEqual(executedCommands.at(-1).slice(0, 3), [
+    'vscode.diff',
+    { path: '/repo/old.txt', ref: 'refs/remotes/origin/main' },
+    { path: '/repo/new.txt', ref: 'target' },
+  ]);
+});
+
+test('rollback rejects a changed branch after confirmation and passes its original HEAD to Git', async () => {
+  const commit = { hash: 'ancestor' };
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: { HEAD: { name: 'main', commit: 'head' }, mergeChanges: [] },
+    getMergeBase: async () => commit.hash,
+  };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { git: { path: '/git' } }, loadGraph: async () => {},
+  });
+  const operationState = git.operationState;
+  const rollback = git.rollback;
+  const calls = [];
+  git.operationState = async () => undefined;
+  git.rollback = async (...args) => { calls.push(args); return true; };
+  informationMessages.length = 0;
+  quickPickIndex = 0;
+  try {
+    warningHandler = async () => {
+      repository.state.HEAD = { name: 'other', commit: 'other-head' };
+      return 'Rollback';
+    };
+    await provider.rollbackGraphCommit(repository, commit);
+    assert.equal(calls.length, 0);
+    assert.equal(informationMessages.at(-1), 'HEAD or the Git operation changed before rollback.');
+
+    repository.state.HEAD = { name: 'main', commit: 'head' };
+    warningHandler = async () => 'Rollback';
+    await provider.rollbackGraphCommit(repository, commit);
+    assert.deepEqual(calls[0].slice(1), [
+      'ancestor', 'soft', { gitPath: '/git', expectedHead: { name: 'main', commit: 'head' } },
+    ]);
+  } finally {
+    warningHandler = undefined;
+    git.operationState = operationState;
+    git.rollback = rollback;
+  }
+});
+
+test('does not apply a graph load after switching repositories', async () => {
+  let releaseRefs;
+  const repository = {
+    rootUri: { fsPath: '/first' }, state: { HEAD: { commit: 'head' } },
+    getRefs: () => new Promise((resolve) => { releaseRefs = resolve; }),
+    log: () => { throw new Error('stale graph queried commits'); },
+  };
+  const first = { repositoryId: '/first', scope: { kind: 'all' }, limit: 50, commits: [], refs: [] };
+  const second = { repositoryId: '/second', commits: [{ hash: 'current' }] };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { repositories: [repository] }, graph: first, postGraph: async () => {},
+  });
+  const load = provider.loadGraph();
+  await Promise.resolve();
+  provider.graph = second;
+  releaseRefs([]);
+  await load;
+  assert.equal(provider.graph, second);
+  assert.deepEqual(second.commits, [{ hash: 'current' }]);
+});
+
+test('drops stale batch stats and posts only the later snapshot', async () => {
+  const change = { uri: { toString: () => 'file:///repo/file.txt' } };
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: { mergeChanges: [], indexChanges: [], workingTreeChanges: [change], untrackedChanges: [] },
+  };
+  let resolveOld;
+  let resolveNew;
+  const posts = [];
+  let count = 0;
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { repositories: [repository] }, dirtyStats: new Set(['/repo']), stats: new Map(),
+    view: { webview: { postMessage: async (value) => posts.push(value) } },
+    computeStats: () => new Promise((resolve) => {
+      (count++ ? resolveNew = resolve : resolveOld = resolve);
+    }),
+  });
+  const work = provider.updateStats();
+  provider.dirtyStats.add('/repo');
+  resolveOld({ insertions: 1, deletions: 0, files: { staged: {}, unstaged: {} } });
+  await Promise.resolve();
+  resolveNew({ insertions: 2, deletions: 0, files: { staged: {}, unstaged: {} } });
+  await work;
+  assert.deepEqual(posts.map((value) => value.insertions), [2]);
+  assert.equal(provider.stats.get('/repo').insertions, 2);
+});
+
+test('generation posts its result and clears activity even while an error toast stays open', async () => {
+  const repository = { rootUri: { fsPath: '/repo' } };
+  const posts = [];
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { git: { path: '/git' }, repositories: [repository] },
+    noVerify: new Set(), generating: new Set(),
+    view: { webview: { postMessage: async (value) => posts.push(value) } },
+  });
+  const generate = ai.generateCommitMessage;
+  try {
+    ai.generateCommitMessage = async () => 'feat: generated';
+    await provider.handleMessage({ type: 'generateMessage', repositoryId: '/repo' });
+    assert.deepEqual(posts.map(({ type }) => type), ['aiState', 'generatedMessage', 'aiState']);
+    assert.equal(posts[1].message, 'feat: generated');
+    assert.equal(provider.generating.size, 0);
+
+    posts.length = 0;
+    ai.generateCommitMessage = async () => { throw new Error('offline'); };
+    errorHandler = () => new Promise(() => {});
+    const result = await Promise.race([
+      provider.handleMessage({ type: 'generateMessage', repositoryId: '/repo' }).then(() => 'settled'),
+      new Promise((resolve) => setTimeout(() => resolve('timed out'), 50)),
+    ]);
+    assert.equal(result, 'settled');
+    assert.deepEqual(posts.map(({ type }) => type), ['aiState', 'aiState']);
+    assert.equal(provider.generating.size, 0);
+  } finally {
+    ai.generateCommitMessage = generate;
+    errorHandler = undefined;
+  }
 });

@@ -1,7 +1,8 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
-const { readFile } = require('node:fs/promises');
+const { constants } = require('node:fs');
+const { lstat, open } = require('node:fs/promises');
 const path = require('node:path');
 const vscode = require('vscode');
 
@@ -9,6 +10,8 @@ const MAX_INPUT = 500_000;
 const MAX_OUTPUT = 64_000;
 const TIMEOUT_MS = 120_000;
 const RESOLVE_TIMEOUT_MS = 600_000;
+const MAX_UNTRACKED_FILE = 8_000;
+const MAX_UNTRACKED_INPUT = 64_000;
 const MODELS = {
   codex: [
     ['', 'Provider default'],
@@ -45,9 +48,9 @@ async function generateCommitMessage(repository) {
   const { provider, model, effort } = aiSelection(configuration);
   let prompt;
   try {
-    prompt = await buildPrompt(repository);
+    prompt = await buildPrompt(repository, configuration.get('includeUntrackedContent', false));
   } catch (error) {
-    await vscode.window.showErrorMessage(
+    void vscode.window.showErrorMessage(
       `Commit message generation failed: ${error instanceof Error ? error.message : String(error)}`,
     );
     return;
@@ -64,7 +67,7 @@ async function generateCommitMessage(repository) {
         return cleanOutput(await runCli(provider, model, effort, prompt, repository.rootUri.fsPath, token));
       } catch (error) {
         if (!token.isCancellationRequested) {
-          await vscode.window.showErrorMessage(
+          void vscode.window.showErrorMessage(
             `Commit message generation failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
@@ -74,6 +77,7 @@ async function generateCommitMessage(repository) {
 }
 
 async function resolveConflicts(repository) {
+  await repository.status();
   const conflicts = [...new Map(repository.state.mergeChanges.map((change) => [
     change.uri.toString(),
     change,
@@ -83,6 +87,20 @@ async function resolveConflicts(repository) {
     change.uri.fsPath,
   ));
   if (!files.length) return true;
+  const head = repository.state.HEAD?.commit;
+  const branch = repository.state.HEAD?.name;
+  const rebase = repository.state.rebaseCommit?.hash;
+  const originals = new Map();
+  for (const change of conflicts) {
+    try {
+      const bytes = await readRegularFile(change.uri.fsPath);
+      if (bytes && !bytes.includes(0) && hasConflictMarkers(bytes)) {
+        originals.set(change.uri.toString(), bytes);
+      }
+    } catch (error) {
+      if (!['ENOENT', 'ELOOP'].includes(error?.code)) throw error;
+    }
+  }
 
   const configuration = vscode.workspace.getConfiguration('gitChangeStats');
   const { provider, model, effort } = aiSelection(configuration, true);
@@ -91,7 +109,7 @@ async function resolveConflicts(repository) {
     'Read and follow any applicable AGENTS.md or CLAUDE.md instructions.',
     'Inspect the base, current, and incoming changes and preserve both sides\' intended behavior.',
     'Remove all conflict markers and finish any required file deletions. Do not stage files; Better Source Control will stage the resolved conflict paths after you finish.',
-    'Do not commit, continue, skip, or abort the merge or rebase. Do not modify unrelated files.',
+    'Do not commit, continue, skip, or abort the merge, rebase, cherry-pick, or revert. Do not modify unrelated files.',
     `Conflicted paths:\n${files.map((file) => `- ${file}`).join('\n')}`,
   ].join('\n\n');
 
@@ -107,13 +125,30 @@ async function resolveConflicts(repository) {
           writable: true,
           timeoutMs: RESOLVE_TIMEOUT_MS,
         });
+        logApi(repository, 'status');
+        await repository.status();
+        if (repository.state.HEAD?.commit !== head
+          || repository.state.HEAD?.name !== branch
+          || repository.state.rebaseCommit?.hash !== rebase) {
+          throw new Error('The repository operation changed while AI was resolving conflicts.');
+        }
+        const stillConflicted = new Set(repository.state.mergeChanges.map((change) => change.uri.toString()));
+        if (stillConflicted.size !== conflicts.length
+          || conflicts.some((change) => !stillConflicted.has(change.uri.toString()))) {
+          throw new Error('The conflict set changed while AI was resolving it.');
+        }
         const resolved = [];
         for (const change of conflicts) {
+          const original = originals.get(change.uri.toString());
+          if (!original || !stillConflicted.has(change.uri.toString())) continue;
           try {
-            if (!hasConflictMarkers(await readFile(change.uri.fsPath))) resolved.push(change.uri.fsPath);
+            const current = await readRegularFile(change.uri.fsPath);
+            if (current && !current.includes(0) && !current.equals(original)
+              && !hasPossibleConflictMarkers(current)) {
+              resolved.push(change.uri.fsPath);
+            }
           } catch (error) {
-            if (error?.code === 'ENOENT') resolved.push(change.uri.fsPath);
-            else throw error;
+            if (!['ENOENT', 'ELOOP'].includes(error?.code)) throw error;
           }
         }
         if (resolved.length) {
@@ -124,8 +159,8 @@ async function resolveConflicts(repository) {
         await repository.status();
         const remaining = repository.state.mergeChanges.length;
         if (remaining) {
-          await vscode.window.showWarningMessage(
-            `AI resolved some conflicts, but ${remaining} ${remaining === 1 ? 'file still has' : 'files still have'} conflicts.`,
+          void vscode.window.showWarningMessage(
+            `${remaining} ${remaining === 1 ? 'file still needs' : 'files still need'} conflict resolution.`,
           );
         }
         return remaining === 0;
@@ -133,7 +168,7 @@ async function resolveConflicts(repository) {
         logApi(repository, 'status');
         await repository.status().catch(() => {});
         if (!token.isCancellationRequested) {
-          await vscode.window.showErrorMessage(
+          void vscode.window.showErrorMessage(
             `Conflict resolution failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
@@ -143,9 +178,25 @@ async function resolveConflicts(repository) {
   );
 }
 
+async function readRegularFile(filePath) {
+  if (!(await lstat(filePath)).isFile()) return;
+  const file = await open(filePath,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    if (!(await file.stat()).isFile()) return;
+    return await file.readFile();
+  } finally {
+    await file.close();
+  }
+}
+
 function hasConflictMarkers(bytes) {
   if (bytes.includes(0)) return false;
   return /^<<<<<<<(?: .*)?\r?\n[\s\S]*?^=======\r?\n[\s\S]*?^>>>>>>>(?: .*)?$/m.test(bytes.toString());
+}
+
+function hasPossibleConflictMarkers(bytes) {
+  return /^(?:<{7}|={7}|>{7}|\|{7})/m.test(bytes.toString());
 }
 
 function modelOptions(provider) {
@@ -157,8 +208,7 @@ function effortOptions(provider, _model) {
 }
 
 function normalizeModel(provider, model) {
-  const value = model?.trim() ?? '';
-  return modelOptions(provider).some(([candidate]) => candidate === value) ? value : '';
+  return typeof model === 'string' ? model.trim() : '';
 }
 
 function normalizeEffort(provider, model, effort) {
@@ -202,16 +252,28 @@ async function configureAI() {
   const effortKey = conflict ? 'conflictReasoningEffort' : 'reasoningEffort';
   const title = conflict ? 'Conflict Resolver' : 'Commit Messages';
   const currentModel = normalizeModel(currentProvider, configuration.get(modelKey, ''));
-  const model = await vscode.window.showQuickPick(
-    modelOptions(currentProvider).map(([value, label]) => ({
+  const knownModels = modelOptions(currentProvider);
+  const choices = [...knownModels, ...(currentModel && !knownModels.some(([value]) => value === currentModel)
+    ? [[currentModel, currentModel]] : [])].map(([value, label]) => ({
       label,
       description: value || 'default',
       value,
       picked: value === currentModel,
-    })),
+    }));
+  const model = await vscode.window.showQuickPick(
+    [...choices, { label: 'Custom model ID...', custom: true }],
     { title: `Better Source Control: ${title} Model` },
   );
   if (!model) return;
+  if (model.custom) {
+    model.value = await vscode.window.showInputBox({
+      title: `Better Source Control: ${title} Model ID`,
+      value: currentModel,
+      prompt: 'Enter a model ID supported by the selected CLI',
+    });
+    if (!model.value?.trim()) return;
+    model.value = model.value.trim();
+  }
 
   const currentEffort = normalizeEffort(
     currentProvider,
@@ -262,7 +324,7 @@ async function normalizeConfiguration() {
   }
 }
 
-async function buildPrompt(repository) {
+async function buildPrompt(repository, includeUntrackedContent) {
   const staged = repository.state.indexChanges.length > 0;
   const changes = staged
     ? repository.state.indexChanges
@@ -277,8 +339,9 @@ async function buildPrompt(repository) {
   )))];
   if (!files.length) throw new Error('No changes are available for a commit message.');
   logApi(repository, 'diff', staged);
-  const patch = await repository.diff(staged).catch(() => '');
-  const context = `Files:\n${files.map((file) => `- ${file}`).join('\n')}\n\nPatch:\n${patch}`;
+  const patch = await repository.diff(staged);
+  const untracked = staged || !includeUntrackedContent ? '' : await untrackedContext(repository);
+  const context = `Files:\n${files.map((file) => `- ${file}`).join('\n')}${untracked}\n\nPatch:\n${patch}`;
   const clipped = context.length > MAX_INPUT
     ? `${context.slice(0, MAX_INPUT)}\n\n[Diff truncated]`
     : context;
@@ -289,6 +352,47 @@ async function buildPrompt(repository) {
     'Return only the subject line, with no quotes, markdown, explanation, or trailing period.',
     clipped,
   ].join('\n\n');
+}
+
+async function untrackedContext(repository) {
+  let remaining = MAX_UNTRACKED_INPUT;
+  const contents = [];
+  const untracked = [...new Map([
+    ...repository.state.untrackedChanges,
+    ...repository.state.workingTreeChanges.filter((change) => change.status === 7),
+  ].map((change) => [change.uri.toString(), change])).values()];
+  for (const change of untracked) {
+    if (remaining <= 0) break;
+    const filePath = change.uri.fsPath;
+    const relative = path.relative(repository.rootUri.fsPath, filePath);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    try {
+      if (!(await lstat(filePath)).isFile()) continue;
+      const file = await open(filePath,
+        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+      let bytes;
+      try {
+        if (!(await file.stat()).isFile()) continue;
+        const buffer = Buffer.alloc(Math.min(MAX_UNTRACKED_FILE, remaining));
+        const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+        bytes = buffer.subarray(0, bytesRead);
+      } finally {
+        await file.close();
+      }
+      if (bytes.includes(0)) continue;
+      let value;
+      try {
+        value = new TextDecoder('utf-8', { fatal: true }).decode(bytes, { stream: true });
+      } catch {
+        continue;
+      }
+      contents.push(`\n\nUntracked ${relative}:\n${value}`);
+      remaining -= bytes.length;
+    } catch (error) {
+      if (!['ENOENT', 'EISDIR', 'ELOOP'].includes(error?.code)) throw error;
+    }
+  }
+  return contents.join('');
 }
 
 function cliArgs(provider, model, effort, writable = false) {
@@ -306,9 +410,10 @@ function cliArgs(provider, model, effort, writable = false) {
         '--no-chrome',
         ...(writable
           ? [
+              '--restricted',
               '--permission-mode', 'dontAsk',
               '--tools', 'Read,Edit,Write,Glob,Grep,Bash',
-              '--allowedTools', 'Read,Edit,Write,Glob,Grep,Bash(git *)',
+              '--allowedTools', 'Read,Edit,Write,Glob,Grep',
             ]
           : ['--tools', '']),
         '--disallowedTools', 'mcp__*',
@@ -347,6 +452,7 @@ function runCli(provider, model, effort, prompt, cwd, token, {
     const child = spawn(command, args, {
       cwd,
       shell: false,
+      detached: process.platform !== 'win32',
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -354,8 +460,12 @@ function runCli(provider, model, effort, prompt, cwd, token, {
     let stderr = '';
     let settled = false;
     let killTimer;
+    let stopError;
+    let termination = Promise.resolve();
     const timeout = setTimeout(() => stop(new Error('The selected CLI timed out.')), timeoutMs);
-    const cancellation = token.onCancellationRequested(() => stop(new Error('Generation cancelled.')));
+    let cancellation = { dispose() {} };
+    cancellation = token.onCancellationRequested(() => stop(new Error('Generation cancelled.')));
+    if (token.isCancellationRequested) stop(new Error('Generation cancelled.'));
 
     function finish(callback, value) {
       if (settled) return;
@@ -366,20 +476,41 @@ function runCli(provider, model, effort, prompt, cwd, token, {
       callback(value);
     }
 
+    function signalTree(signal) {
+      if (process.platform === 'win32' && child.pid) {
+        return new Promise((done) => {
+          const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+            windowsHide: true,
+            stdio: 'ignore',
+          });
+          killer.once('error', done);
+          killer.once('close', done);
+        });
+      } else if (child.pid) {
+        try { process.kill(-child.pid, signal); } catch (error) {
+          if (error?.code !== 'ESRCH') child.kill(signal);
+        }
+      } else {
+        child.kill(signal);
+      }
+    }
+
     function stop(error) {
-      if (settled) return;
-      child.kill('SIGTERM');
-      finish(reject, error);
-      killTimer = setTimeout(() => child.kill('SIGKILL'), 2_000);
+      if (settled || stopError) return;
+      stopError = error;
+      termination = Promise.resolve().then(() => signalTree('SIGTERM')).catch(() => {});
+      killTimer = setTimeout(() => {
+        void Promise.resolve().then(() => signalTree('SIGKILL')).catch(() => {});
+      }, 2_000);
       killTimer.unref?.();
     }
 
-    child.on('error', (error) => finish(
-      reject,
-      error.code === 'ENOENT'
+    child.on('error', (error) => {
+      if (stopError) return;
+      finish(reject, error.code === 'ENOENT'
         ? new Error(`${command} was not found on VS Code's PATH.`)
-        : error,
-    ));
+        : error);
+    });
     child.stdout.on('data', (chunk) => {
       stdout += chunk;
       if (stdout.length > MAX_OUTPUT) stop(new Error('The selected CLI returned too much output.'));
@@ -387,8 +518,12 @@ function runCli(provider, model, effort, prompt, cwd, token, {
     child.stderr.on('data', (chunk) => {
       if (stderr.length < MAX_OUTPUT) stderr += chunk;
     });
-    child.on('close', (code) => {
-      if (code === 0) finish(resolve, stdout);
+    child.on('close', async (code) => {
+      if (stopError) {
+        await termination;
+        if (process.platform !== 'win32') signalTree('SIGKILL');
+        finish(reject, stopError);
+      } else if (code === 0) finish(resolve, stdout);
       else finish(reject, new Error(stderr.trim().split(/\r?\n/).pop() || `${command} exited with code ${code}.`));
     });
     child.stdin.on('error', () => {});

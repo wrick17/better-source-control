@@ -14,17 +14,17 @@ function layoutGraph(commits) {
     const output = [];
     const parents = commit.parents ?? [];
     let firstParentAdded = false;
-    if (parents.length) {
-      for (const node of input) {
-        if (node.hash === commit.hash) {
-          if (!firstParentAdded) {
-            output.push({ hash: parents[0], color: node.color });
-            firstParentAdded = true;
-          }
-        } else {
-          output.push({ ...node });
+    for (const node of input) {
+      if (node.hash === commit.hash) {
+        if (parents.length && !firstParentAdded) {
+          output.push({ hash: parents[0], color: node.color });
+          firstParentAdded = true;
         }
+      } else {
+        output.push({ ...node });
       }
+    }
+    if (parents.length) {
       for (let index = firstParentAdded ? 1 : 0; index < parents.length; index++) {
         output.push({ hash: parents[index], color: color() });
       }
@@ -32,7 +32,7 @@ function layoutGraph(commits) {
     lanes.splice(0, lanes.length, ...output);
     const inputIndex = input.findIndex((node) => node.hash === commit.hash);
     const lane = inputIndex === -1 ? input.length : inputIndex;
-    const commitColor = output[lane]?.color ?? input[lane]?.color ?? color();
+    const commitColor = input[lane]?.color ?? output[lane]?.color ?? color();
     return {
       ...commit,
       lane,

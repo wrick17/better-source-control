@@ -1,35 +1,42 @@
-name: Test and publish
+name: Build and publish extension
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 
 jobs:
   test:
+    name: Test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out source
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
-      - run: npm test
+      - name: Run unit and Git integration tests
+        run: npm test
 
   package:
+    name: Build VSIX
     needs: test
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out tested source
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
@@ -38,13 +45,22 @@ jobs:
       - name: Read package version
         id: version
         run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7
+      - name: Save installable extension
+        uses: actions/upload-artifact@v7
+        id: artifact
         with:
           name: better-source-control-vsix
           path: better-source-control.vsix
           if-no-files-found: error
+      - name: Summarize build
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        run: |
+          printf '## Extension build\n\nVersion: **%s**\n\nTests passed on Linux, macOS, and Windows.\n\n[Download the VSIX artifact](%s)\n' "$PACKAGE_VERSION" "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
 
   publish:
+    name: Publish to Marketplace
     if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: package
     runs-on: ubuntu-latest
@@ -53,11 +69,13 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
-      - uses: actions/setup-node@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
-      - uses: actions/download-artifact@v8
+      - name: Download tested VSIX
+        uses: actions/download-artifact@v8
         with:
           name: better-source-control-vsix
       - name: Install Marketplace CLI
@@ -79,3 +97,18 @@ jobs:
             exit 1
           fi
           vsce publish --packagePath better-source-control.vsix --skip-license --skip-duplicate
+      - name: Summarize publication
+        if: always()
+        env:
+          PACKAGE_VERSION: ${{ needs.package.outputs.version }}
+          ALREADY_PUBLISHED: ${{ steps.marketplace.outputs.published }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ "$JOB_STATUS" != success ]; then
+            result='Publication did not complete. Check the failed step above.'
+          elif [ "$ALREADY_PUBLISHED" = true ]; then
+            result='This version already exists; no upload was needed.'
+          else
+            result='Marketplace accepted the upload. Public availability may take a few minutes.'
+          fi
+          printf '## Marketplace publication\n\nVersion: **%s**\n\n%s\n\n[Open Better Source Control](https://marketplace.visualstudio.com/items?itemName=wrick17.git-change-stats)\n' "$PACKAGE_VERSION" "$result" >> "$GITHUB_STEP_SUMMARY"

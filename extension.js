@@ -1119,7 +1119,7 @@ function fullRefName(ref) {
   return ref.type === 0
     ? `refs/heads/${ref.name}`
     : ref.type === 1
-      ? `refs/remotes/${ref.name.includes('/') || !ref.remote ? ref.name : `${ref.remote}/${ref.name}`}`
+      ? `refs/remotes/${ref.remote && !ref.name.startsWith(`${ref.remote}/`) ? `${ref.remote}/${ref.name}` : ref.name}`
       : `refs/tags/${ref.name}`;
 }
 

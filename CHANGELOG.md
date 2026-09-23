@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 — 2026-09-23
+
+### Fixed
+
+- Preserve the remote name for branches containing slashes, fixing Auto commit graph loading and base-branch comparisons.
+
 ## 1.1.0 — 2026-09-23
 
 ### Added

@@ -418,6 +418,39 @@ test('builds valid fully qualified remote references', () => {
     fullRefName({ type: 1, name: 'origin/master', remote: 'origin' }),
     'refs/remotes/origin/master',
   );
+  assert.equal(
+    fullRefName({ type: 1, name: 'feat/dn', remote: 'origin' }),
+    'refs/remotes/origin/feat/dn',
+  );
+  assert.equal(
+    fullRefName({ type: 1, name: 'origin/feat/dn', remote: 'origin' }),
+    'refs/remotes/origin/feat/dn',
+  );
+  assert.equal(
+    fullRefName({ type: 1, name: 'feat/dn', remote: 'upstream' }),
+    'refs/remotes/upstream/feat/dn',
+  );
+});
+
+test('Auto graph includes a remote branch base with a slash in its name', async () => {
+  let loggedRefs;
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: { HEAD: { name: 'feat/dn-dev', commit: 'head' } },
+    getRefs: async () => [],
+    getBranchBase: async () => ({ type: 1, name: 'feat/dn', remote: 'origin' }),
+    log: async ({ refNames }) => { loggedRefs = refNames; return []; },
+  };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { repositories: [repository] },
+    graph: { repositoryId: '/repo', scope: { kind: 'auto' }, limit: 50, commits: [], refs: [] },
+    postGraph: async () => {},
+  });
+
+  await provider.loadGraph();
+
+  assert.deepEqual(loggedRefs, ['refs/heads/feat/dn-dev', 'refs/remotes/origin/feat/dn']);
+  assert.equal(provider.graph.error, undefined);
 });
 
 test('loads commit details from its parent instead of the working tree', async () => {

@@ -49,3 +49,9 @@ bun run test:host
 ```
 
 This opens a temporary test window and repository. Set `CODE_EXECUTABLE` to the VS Code CLI path if `code` is not on `PATH`. The test does not install the extension or change your open workspace. CI runs the Node suite on Linux, macOS, and Windows; the host smoke test requires a desktop session.
+
+## CI and publishing
+
+Every push and pull request runs the Node tests on Linux, macOS, and Windows, then builds a downloadable VSIX artifact. A push to `master` publishes that same VSIX to the Marketplace when its `package.json` version is new. Run the workflow manually on `master` to retry a failed publication; an existing version is skipped.
+
+Set the repository Actions secret `VSCE_PAT` to an Azure DevOps token for the `wrick17` publisher with **All accessible organizations** and **Marketplace (Manage)** scope. A new version fails with an actionable error if this secret is missing. [VS Code's publishing guide](https://code.visualstudio.com/api/working-with-extensions/publishing-extension) covers token setup. The current token expires November 22, 2026. Global Azure DevOps PATs are scheduled to retire on December 1, 2026, so this workflow will need a supported authentication replacement before then.

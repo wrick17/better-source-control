@@ -1,17 +1,81 @@
-name: Test
-on: [push, pull_request]
+name: Test and publish
+on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
+
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
       - run: npm test
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Package VSIX
+        run: npx --yes @vscode/vsce@4.0.0 package --out better-source-control.vsix --skip-license
+      - name: Read package version
+        id: version
+        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: better-source-control-vsix
+          path: better-source-control.vsix
+          if-no-files-found: error
+
+  publish:
+    if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: package
+    runs-on: ubuntu-latest
+    concurrency:
+      group: marketplace-wrick17-git-change-stats
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: better-source-control-vsix
+      - name: Install Marketplace CLI
+        run: npm install --global @vscode/vsce@4.0.0
+      - name: Check Marketplace version
+        id: marketplace
+        env:
+          PACKAGE_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          vsce show wrick17.git-change-stats --json > "$RUNNER_TEMP/marketplace.json"
+          node -e 'const versions = require(process.argv[1]).versions; if (!Array.isArray(versions)) throw Error("Marketplace returned no versions"); const published = versions.some(v => v.version === process.env.PACKAGE_VERSION && !v.targetPlatform); require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `published=${published}\n`); console.log(`${process.env.PACKAGE_VERSION} already published: ${published}`)' "$RUNNER_TEMP/marketplace.json"
+      - name: Publish VSIX
+        if: steps.marketplace.outputs.published == 'false'
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo '::error::Set the VSCE_PAT repository secret to publish this new Marketplace version.'
+            exit 1
+          fi
+          vsce publish --packagePath better-source-control.vsix --skip-license --skip-duplicate

@@ -604,6 +604,7 @@ test('graph commit actions use native APIs and shell-free cherry-pick', async ()
   assert.equal(await amendMessage(repository, 'fix: skip hooks', { ...guarded, noVerify: true }), true);
   assert.equal(await amendMessage(repository, '   ', { gitPath: '/git' }), false);
   assert.equal(await emptyTreeHash(repository, { gitPath: '/git' }), 'empty-tree');
+  assert.deepEqual(gitExecCalls.at(-1)[1], ['hash-object', '-t', 'tree', '/dev/null']);
   assert.equal(await rollback(repository, fetchedCommit, 'mixed', {
     gitPath: '/git', expectedHead: { name: 'feature', commit: firstCommit },
   }), true);

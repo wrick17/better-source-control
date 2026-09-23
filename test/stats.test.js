@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const path = require('node:path');
 const {
   buildFileTree,
   changedFileCount,
@@ -34,8 +35,8 @@ test('maps Git statuses and builds a sorted file tree', () => {
   assert.equal(statusBadge(18), '!');
 
   const files = [
-    { type: 'file', name: 'z.js', relativePath: 'src/z.js' },
-    { type: 'file', name: 'a.js', relativePath: 'src/components/a.js' },
+    { type: 'file', name: 'z.js', relativePath: path.join('src', 'z.js') },
+    { type: 'file', name: 'a.js', relativePath: path.join('src', 'components', 'a.js') },
     { type: 'file', name: 'README.md', relativePath: 'README.md' },
   ];
   const tree = buildFileTree(files);

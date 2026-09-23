@@ -22,12 +22,12 @@ Module._load = function load(request, parent, isMain) {
   };
   return originalLoad.call(this, request, parent, isMain);
 };
-const { abortOperation, cherryPick, operationState, publish, resetToOrigin, revertCommit, rollback } = require('../git-operations');
+const { abortOperation, cherryPick, emptyTreeHash, operationState, publish, resetToOrigin, revertCommit, rollback } = require('../git-operations');
 Module._load = originalLoad;
 
 const gitEnv = {
   ...process.env,
-  GIT_CONFIG_GLOBAL: os.devNull,
+  GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_TERMINAL_PROMPT: '0',
   GIT_AUTHOR_NAME: 'Test',
@@ -96,6 +96,11 @@ test('a branch named MERGE_HEAD is not mistaken for an active merge', async (t) 
   assert.equal(git(repo, 'rev-parse', '--verify', 'MERGE_HEAD'), git(repo, 'rev-parse', 'HEAD'));
   const target = repository(repo);
   assert.equal(await operationState(target, { gitPath: 'git' }), undefined);
+});
+
+test('Git resolves the empty tree through its own null path', async (t) => {
+  const { repo } = setup(t);
+  assert.match(await emptyTreeHash(repository(repo), { gitPath: 'git' }), /^[a-f0-9]{40,64}$/);
 });
 
 test('reset uses freshly fetched FETCH_HEAD despite a stale tracking ref', async (t) => {

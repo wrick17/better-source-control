@@ -2,7 +2,6 @@
 
 const { execFile } = require('node:child_process');
 const fs = require('node:fs/promises');
-const os = require('node:os');
 const path = require('node:path');
 const { promisify } = require('node:util');
 const vscode = require('vscode');
@@ -406,7 +405,7 @@ async function runGuardedGit(repository, gitPath, args, expectedHead) {
 
 async function emptyTreeHash(repository, { gitPath } = {}) {
   if (!gitPath) throw new Error('Git executable unavailable.');
-  const { stdout } = await execGitCommand(repository, gitPath, ['hash-object', '-t', 'tree', os.devNull]);
+  const { stdout } = await execGitCommand(repository, gitPath, ['hash-object', '-t', 'tree', '/dev/null']);
   const hash = stdout.trim();
   if (!hash) throw new Error('Unable to resolve the empty Git tree.');
   return hash;

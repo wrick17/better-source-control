@@ -745,6 +745,13 @@ class RepositoryViewProvider {
     }
     if (!repository) return;
 
+    if (message.type === 'copyBranchName') {
+      const branchName = repository.state.HEAD?.name;
+      if (branchName) await vscode.env.clipboard.writeText(branchName);
+      else await vscode.window.showInformationMessage('This repository has no current branch.');
+      return;
+    }
+
     if (message.type === 'toggleNoVerify') {
       await this.toggleNoVerify(message.repositoryId);
       return;
@@ -1838,6 +1845,10 @@ function html() {
         menuItem('Show Commit Graph', () => {
           menu.hidePopover();
           post('showGraph', repository);
+        }),
+        menuItem('Copy Branch Name', () => {
+          menu.hidePopover();
+          post('copyBranchName', repository);
         }),
         menuSeparator(),
         menuItem('Pull and Merge', () => execute('pullMerge')),

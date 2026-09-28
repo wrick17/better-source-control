@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.2 — 2026-09-28
+
+### Added
+
+- Copy Branch Name in each repository's actions menu copies the full current branch name.
+
 ## 1.1.1 — 2026-09-23
 
 ### Fixed

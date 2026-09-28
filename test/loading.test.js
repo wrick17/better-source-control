@@ -115,6 +115,7 @@ test('generates valid webview JavaScript', () => {
   assert.match(markup, /expanded && repository\.expandable/);
   assert.match(markup, /section\.inert = Boolean\(progressLabel\)/);
   assert.match(markup, /section\.setAttribute\('aria-busy'/);
+  assert.match(markup, /menuItem\('Copy Branch Name'/);
   assert.match(markup, /\.graph-date \{ min-width: max-content;/);
   assert.doesNotMatch(markup, /graph-inline-action/);
   assert.match(markup, /\.graph-meta > \.icon-button \{ flex: none; margin-left: auto; margin-right: 20px; \}/);
@@ -197,6 +198,34 @@ test('copies the selected GitHub commit link and leaves the clipboard alone with
   await provider.handleMessage({ type: 'graphCopyRemoteLink', repositoryId: '/repo', hash: commit.hash });
   assert.deepEqual(clipboardWrites, ['https://github.com/acme/project/commit/abc123']);
   assert.deepEqual(informationMessages, ['This repository has no GitHub remote.']);
+});
+
+test('copies the full branch name from the selected repository and skips detached HEAD', async () => {
+  const repositories = [
+    { rootUri: { fsPath: '/repo-a' }, state: { HEAD: { name: 'feature/long/branch-name' } } },
+    { rootUri: { fsPath: '/repo-b' }, state: { HEAD: { name: 'other' } } },
+    { rootUri: { fsPath: '/repo-detached' }, state: { HEAD: { commit: 'abc123' } } },
+    { rootUri: { fsPath: '/repo-no-head' }, state: {} },
+  ];
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { repositories },
+  });
+  clipboardWrites.length = 0;
+  informationMessages.length = 0;
+
+  await provider.handleMessage({ type: 'copyBranchName', repositoryId: '/repo-a' });
+  assert.deepEqual(clipboardWrites, ['feature/long/branch-name']);
+  await provider.handleMessage({ type: 'copyBranchName', repositoryId: '/repo-b' });
+  assert.deepEqual(clipboardWrites, ['feature/long/branch-name', 'other']);
+
+  await provider.handleMessage({ type: 'copyBranchName', repositoryId: '/repo-detached' });
+  await provider.handleMessage({ type: 'copyBranchName', repositoryId: '/repo-no-head' });
+  await provider.handleMessage({ type: 'copyBranchName', repositoryId: '/unknown' });
+  assert.deepEqual(clipboardWrites, ['feature/long/branch-name', 'other']);
+  assert.deepEqual(informationMessages, [
+    'This repository has no current branch.',
+    'This repository has no current branch.',
+  ]);
 });
 
 test('exposes separate AI controls with a shared provider', () => {

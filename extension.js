@@ -1341,6 +1341,10 @@ function html() {
     .badge-I { color: var(--vscode-gitDecoration-ignoredResourceForeground); }
     .badge-conflict { color: var(--vscode-gitDecoration-conflictingResourceForeground); }
     .file-name { flex: none; }
+    [data-badge="M"] .file-name { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
+    [data-badge="!"] .file-name { color: var(--vscode-charts-purple, #b180d7); }
+    [data-badge="D"] .file-name { color: var(--vscode-gitDecoration-deletedResourceForeground); }
+    [data-badge="A"] .file-name, [data-badge="U"] .file-name { color: var(--vscode-gitDecoration-addedResourceForeground); }
     .file-dir { min-width: 0; flex: 1; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .stats { display: flex; gap: 5px; margin-left: auto; flex: none; font-size: 11px; font-variant-numeric: tabular-nums; }
     .file-actions { display: none; margin-left: auto; }
@@ -2601,6 +2605,7 @@ function html() {
       } else {
         data.files.forEach((file) => {
           const row = el('div', 'graph-file');
+          row.dataset.badge = file.badge;
           row.tabIndex = 0;
           row.dataset.tooltip = 'Open changes from this commit';
           row.addEventListener('click', (event) => {

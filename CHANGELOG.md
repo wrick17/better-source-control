@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.8 — 2026-10-01
+
+### Changed
+
+- Color filenames by Git state: deleted red, added and untracked green, modified yellow, and conflicted purple in tree, list, and commit details.
+
 ## 1.1.7 — 2026-10-01
 
 ### Fixed

@@ -13,6 +13,7 @@ const git = require('./git-operations');
 const { collectStats } = require('./repository-stats');
 const ai = require('./ai-commit');
 const { layoutGraph, markRollbackTargets } = require('./graph');
+const { loadIconTheme, fileIcon } = require('./file-icons');
 
 const VIEW_ID = 'gitChangeStats.repositories';
 const GRAPH_PAGE_SIZE = 50;
@@ -64,15 +65,38 @@ class RepositoryViewProvider {
     this.busyRepositories = new Set();
     this.graph = undefined;
     this.repositoryListeners = [];
+    this.loadIcons();
     this.apiListeners = [
       api.onDidOpenRepository(() => this.syncRepositories()),
       api.onDidCloseRepository(() => this.syncRepositories()),
       api.onDidChangeState(() => this.syncRepositories()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('gitChangeStats.showNoVerifyButton')) this.refresh();
+        if (event.affectsConfiguration('workbench.iconTheme')) {
+          this.loadIcons();
+          this.refresh();
+        }
       }),
     ];
+    if (vscode.window.onDidChangeActiveColorTheme) {
+      this.apiListeners.push(vscode.window.onDidChangeActiveColorTheme(() => {
+        this.loadIcons();
+        this.refresh();
+      }));
+    }
     this.syncRepositories();
+  }
+
+  loadIcons() {
+    this.iconTheme = loadIconTheme(vscode.extensions?.all ?? [],
+      vscode.workspace.getConfiguration('workbench').get('iconTheme', 'vs-seti'),
+      vscode.window.activeColorTheme?.kind);
+    if (this.graph?.details?.files) {
+      for (const file of this.graph.details.files) {
+        file.icon = fileIcon(this.iconTheme, path.join(file.directory, file.name));
+      }
+      this.postGraph();
+    }
   }
 
   resolveWebviewView(view) {
@@ -495,6 +519,7 @@ class RepositoryViewProvider {
             renameUri: change.renameUri?.toString(),
             name: path.basename(relativePath),
             directory: path.dirname(relativePath),
+            icon: fileIcon(this.iconTheme, relativePath),
             badge,
             canOpen: badge !== 'D',
             insertions: change.insertions,
@@ -551,7 +576,7 @@ class RepositoryViewProvider {
     const renamed = picked.change.renameUri ?? picked.change.uri;
     await vscode.commands.executeCommand(
       'vscode.diff',
-      badge === 'A' ? emptyUri(original) : this.api.toGitUri(original, ref),
+      ['A', 'U'].includes(badge) ? emptyUri(original) : this.api.toGitUri(original, ref),
       badge === 'D' ? emptyUri(renamed) : this.api.toGitUri(renamed, commit.hash),
       `${picked.label} (${ref.replace(/^refs\/(heads|remotes|tags)\//, '')} ↔ ${commit.hash.slice(0, 8)})`,
     );
@@ -921,7 +946,7 @@ class RepositoryViewProvider {
           }
           const original = vscode.Uri.parse(file.originalUri);
           const parent = commit.parents[0];
-          const left = file.badge === 'A' || !parent
+          const left = ['A', 'U'].includes(file.badge) || !parent
             ? emptyUri(original)
             : this.api.toGitUri(original, parent);
           const right = file.badge === 'D'
@@ -1052,6 +1077,17 @@ class RepositoryViewProvider {
 
     const showNoVerifyButton = vscode.workspace.getConfiguration('gitChangeStats')
       .get('showNoVerifyButton', false);
+    const nodes = (files) => {
+      if (this.viewMode !== 'tree') return files;
+      const tree = buildFileTree(files);
+      const visit = (items) => items.forEach((item) => {
+        if (item.type !== 'folder') return;
+        item.icon = fileIcon(this.iconTheme, item.relativePath, true);
+        visit(item.children);
+      });
+      visit(tree);
+      return tree;
+    };
     return {
       id: repository.rootUri.fsPath,
       name: repositoryName(repository),
@@ -1077,8 +1113,8 @@ class RepositoryViewProvider {
         ? repository.state.rebaseCommit?.message ?? ''
         : operation === 'merge' ? repository.inputBox.value : '',
       hiddenUntracked,
-      staged: this.viewMode === 'tree' ? buildFileTree(stagedFiles) : stagedFiles,
-      unstaged: this.viewMode === 'tree' ? buildFileTree(workingFiles) : workingFiles,
+      staged: nodes(stagedFiles),
+      unstaged: nodes(workingFiles),
     };
   }
 
@@ -1101,6 +1137,7 @@ class RepositoryViewProvider {
             relativePath,
             name: path.basename(relativePath),
             directory: path.dirname(relativePath),
+            icon: fileIcon(this.iconTheme, relativePath),
             badge,
             canOpen: badge !== 'D',
             canDiscard: kind === 'unstaged' && !repository.state.mergeChanges.some(sameUri(change)),
@@ -1205,10 +1242,10 @@ function openDiff(api, repository, kind, change) {
   let right;
 
   if (kind === 'staged') {
-    left = badge === 'A' ? emptyUri(originalUri) : api.toGitUri(originalUri, 'HEAD');
+    left = ['A', 'U'].includes(badge) ? emptyUri(originalUri) : api.toGitUri(originalUri, 'HEAD');
     right = badge === 'D' ? emptyUri(renamedUri) : api.toGitUri(renamedUri, '');
   } else {
-    left = badge === 'A' ? emptyUri(originalUri) : api.toGitUri(originalUri, '~');
+    left = ['A', 'U'].includes(badge) ? emptyUri(originalUri) : api.toGitUri(originalUri, '~');
     right = badge === 'D' ? emptyUri(renamedUri) : renamedUri;
   }
 
@@ -1228,7 +1265,7 @@ function html() {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
   <style nonce="${nonce}">
     * { box-sizing: border-box; }
     body { height: 100vh; display: flex; flex-direction: column; margin: 0; padding: 0; overflow: hidden; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); font: 13px var(--vscode-font-family); }
@@ -1300,17 +1337,20 @@ function html() {
     .badge-M { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
     .badge-R { color: var(--vscode-gitDecoration-renamedResourceForeground); }
     .badge-C { color: var(--vscode-gitDecoration-addedResourceForeground); }
+    .badge-U { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
+    .badge-I { color: var(--vscode-gitDecoration-ignoredResourceForeground); }
     .badge-conflict { color: var(--vscode-gitDecoration-conflictingResourceForeground); }
     .file-name { flex: none; }
     .file-dir { min-width: 0; flex: 1; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .stats { display: flex; gap: 5px; margin-left: auto; flex: none; font-size: 11px; font-variant-numeric: tabular-nums; }
     .file-actions { display: none; margin-left: auto; }
-    .file:hover .file-actions, .file:focus-within .file-actions { display: flex; }
-    .file:hover .stats, .file:focus-within .stats { margin-left: 0; }
+    .file:hover .file-actions, .file:focus-within .file-actions, .graph-file:hover .file-actions, .graph-file:focus-within .file-actions { display: flex; }
+    .file:hover .stats, .file:focus-within .stats, .graph-file:hover .stats, .graph-file:focus-within .stats { margin-left: 0; }
     .tree { margin-left: 8px; }
     .tree .file { padding-left: 17px; }
-    .tree .badge { width: 13px; }
-    .folder { color: var(--vscode-descriptionForeground); }
+    .file-icon { width: 16px; height: 16px; flex: none; object-fit: contain; }
+    .folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .folder { color: var(--vscode-foreground); }
     .graph-panel { min-height: 160px; flex: 0 0 clamp(220px, 45vh, 520px); display: flex; flex-direction: column; border-top: 1px solid var(--vscode-panelSection-border, var(--vscode-sideBarSectionHeader-border)); background: var(--vscode-sideBar-background); }
     .graph-panel.collapsed { min-height: 28px; flex-basis: 28px !important; }
     .graph-resizer { position: relative; height: 7px; flex: none; cursor: row-resize; touch-action: none; }
@@ -2132,10 +2172,18 @@ function html() {
       if (node.type === 'folder') {
         const wrapper = el('div');
         const folder = el('div', 'folder');
-        folder.append(icon('down', 'icon', 'Folder expanded'), icon('folder', 'icon', 'Folder ' + node.name), document.createTextNode(node.name));
+        let branch = node;
+        const names = [node.name];
+        while (branch.children.length === 1 && branch.children[0].type === 'folder') {
+          branch = branch.children[0];
+          names.push(branch.name);
+        }
+        const name = el('span', 'folder-name', names.join('/'));
+        name.dataset.tooltip = names.join('/');
+        folder.append(icon('down', 'icon', 'Folder expanded'), resourceIcon(node, 'folder'), name);
         wrapper.append(folder);
         const children = el('div', 'tree');
-        node.children.forEach((child) => children.append(renderNode(repository, kind, child)));
+        branch.children.forEach((child) => children.append(renderNode(repository, kind, child)));
         wrapper.append(children);
         return wrapper;
       }
@@ -2152,8 +2200,8 @@ function html() {
       const badge = el('span', 'badge badge-' + node.badge + (conflicted ? ' badge-conflict' : ''), node.badge);
       badge.dataset.tooltip = conflicted
         ? 'Conflicted'
-        : ({ A: 'Added', D: 'Deleted', M: 'Modified', R: 'Renamed', C: 'Copied' })[node.badge];
-      file.append(badge, el('span', 'file-name', node.name));
+        : ({ A: 'Added', U: 'Untracked', I: 'Ignored', D: 'Deleted', M: 'Modified', R: 'Renamed', C: 'Copied' })[node.badge];
+      file.append(resourceIcon(node, 'file'), el('span', 'file-name', node.name));
       if (model.viewMode === 'list' && node.directory !== '.') {
         const directory = el('span', 'file-dir', node.directory);
         directory.dataset.tooltip = node.directory;
@@ -2173,8 +2221,17 @@ function html() {
         kind === 'staged' ? 'Unstage Changes' : 'Stage Changes',
         () => filePost(kind === 'staged' ? 'unstage' : 'stage', repository, kind, node),
       ));
-      file.append(actions, stats);
+      file.append(actions, stats, badge);
       return file;
+    }
+
+    function resourceIcon(node, fallback) {
+      if (!node.icon) return icon(fallback, 'icon file-icon');
+      const image = el('img', 'file-icon');
+      image.src = node.icon;
+      image.alt = '';
+      image.addEventListener('error', () => image.replaceWith(icon(fallback, 'icon file-icon')), { once: true });
+      return image;
     }
 
     function renderGraph(scrollTop) {
@@ -2529,7 +2586,7 @@ function html() {
             if (event.target === row && event.key === 'Enter') graphFilePost('graphFileDiff', commit, file);
           });
           row.append(
-            el('span', 'badge badge-' + file.badge, file.badge),
+            resourceIcon(file, 'file'),
             el('span', 'file-name', file.name),
           );
           if (file.directory !== '.') {
@@ -2543,7 +2600,7 @@ function html() {
           }
           const stats = el('span', 'stats');
           stats.append(el('span', 'add', '+' + file.insertions), el('span', 'del', '−' + file.deletions));
-          row.append(stats, fileActions);
+          row.append(fileActions, stats, el('span', 'badge badge-' + file.badge, file.badge));
           details.append(row);
         });
       }

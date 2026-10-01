@@ -129,10 +129,28 @@ test('tree rows use one compact indent per level and aligned file/folder columns
   assert.match(markup, /\.tree \{[^}]*margin-left: 8px;/);
   assert.doesNotMatch(markup, /tree-indentGuidesStroke|\.tree::before/);
   assert.match(markup, /\.tree \.file \{ padding-left: 17px; \}/);
-  assert.match(markup, /\.tree \.badge \{ width: 13px; \}/);
+  assert.match(markup, /\.file-icon \{ width: 16px; height: 16px;/);
+  const rootFile = group.children[1].children[1];
+  assert.equal(rootFile.children[0].className, 'icon file-icon');
+  assert.equal(rootFile.children.at(-2).className, 'stats');
+  assert.equal(rootFile.children.at(-1).className, 'badge badge-M');
+  const compact = context.renderNode(repository, 'unstaged', folder('test', [folder('unittests', [
+    folder('common', [file('test.ts')]),
+  ])]));
+  assert.equal(compact.children[0].children[2].text, 'test/unittests/common');
+  assert.equal(compact.children[1].children[0].className, 'file');
   context.model.viewMode = 'list';
   const list = context.renderGroup({ id: '/repo', unstaged: [file('root.js')] }, 'unstaged', 'Changes');
   assert.equal(list.children[1].className, 'file');
+});
+
+test('untracked files retain an empty original side when showing their U status', async () => {
+  const uri = { fsPath: '/repo/new.ts', path: '/repo/new.ts' };
+  executedCommands.length = 0;
+  await openDiff({ toGitUri: () => { throw new Error('Untracked file has no Git original'); } },
+    { rootUri: { fsPath: '/repo' } }, 'unstaged', { uri, status: 7 });
+  assert.equal(executedCommands.at(-1)[1].scheme, 'git-change-stats-empty');
+  assert.equal(executedCommands.at(-1)[2], uri);
 });
 
 test('generates valid webview JavaScript', () => {

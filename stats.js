@@ -34,7 +34,9 @@ function formatChangeStats(files, insertions, deletions) {
 
 function statusBadge(status) {
   if (status >= 12 && status <= 18) return '!';
-  if ([1, 7, 9].includes(status)) return 'A';
+  if (status === 7) return 'U';
+  if (status === 8) return 'I';
+  if ([1, 9].includes(status)) return 'A';
   if ([2, 6].includes(status)) return 'D';
   if ([3, 10].includes(status)) return 'R';
   if (status === 4) return 'C';

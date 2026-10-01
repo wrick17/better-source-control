@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.5 — 2026-10-01
+
+### Changed
+
+- Use installed image file-icon themes for file and folder icons, with generic icons as a fallback.
+- Compact single-child folder paths and show changed-line counts immediately before the trailing Git status.
+- Show untracked files as U and ignored files as I while preserving untracked-file diff behavior.
+
 ## 1.1.4 — 2026-10-01
 
 ### Changed

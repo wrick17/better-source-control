@@ -101,19 +101,21 @@ test('tree rows use one compact indent per level and aligned file/folder columns
   const markup = html();
   const script = markup.slice(markup.indexOf('    function renderGroup('), markup.indexOf('    function renderGraph('));
   const el = (tag, className = '', text) => ({
-    tag, className, text, children: [], dataset: {},
+    tag, className, text, children: [], dataset: {}, attributes: {}, listeners: {},
+    classList: { toggle() {} },
     append(...nodes) { this.children.push(...nodes); },
-    setAttribute() {}, addEventListener() {},
+    setAttribute(key, value) { this.attributes[key] = value; },
+    addEventListener(key, listener) { this.listeners[key] = listener; },
   });
   const context = vm.createContext({
     el, icon: (name, className) => el('svg', className), button: () => el('button'),
     document: { createTextNode: (text) => el('#text', '', text) },
-    model: { viewMode: 'tree' }, collapsedGroups: new Set(),
+    model: { viewMode: 'tree' }, collapsedGroups: new Set(), collapsedFolders: new Set(),
     countFiles: () => 3, setFileStats() {},
   });
   vm.runInContext(script, context);
   const file = (name) => ({ type: 'file', name, relativePath: name, badge: 'M' });
-  const folder = (name, children) => ({ type: 'folder', name, children });
+  const folder = (name, children) => ({ type: 'folder', name, relativePath: name, children });
   const repository = { id: '/repo', unstaged: [
     folder('src', [folder('nested', [file('deep.js')]), file('child.js')]), file('root.js'),
   ] };
@@ -139,6 +141,18 @@ test('tree rows use one compact indent per level and aligned file/folder columns
   ])]));
   assert.equal(compact.children[0].children[2].text, 'test/unittests/common');
   assert.equal(compact.children[1].children[0].className, 'file');
+  compact.children[0].listeners.click();
+  assert.equal(compact.children[1].hidden, true);
+  assert.equal(compact.children[0].attributes['aria-expanded'], 'false');
+  const refreshed = context.renderNode(repository, 'unstaged', folder('test', [file('test.ts')]));
+  assert.equal(refreshed.children[1].hidden, true);
+  let prevented = false;
+  refreshed.children[0].listeners.keydown({
+    target: refreshed.children[0], key: ' ', preventDefault() { prevented = true; },
+  });
+  assert.equal(prevented, true);
+  assert.equal(refreshed.children[1].hidden, false);
+  assert.equal(context.renderNode(repository, 'staged', folder('test', [])).children[1].hidden, false);
   context.model.viewMode = 'list';
   const list = context.renderGroup({ id: '/repo', unstaged: [file('root.js')] }, 'unstaged', 'Changes');
   assert.equal(list.children[1].className, 'file');
@@ -623,7 +637,12 @@ test('renders changed files from cached batch stats without per-file Git calls',
       insertions: 3, deletions: 1, files: { staged: {}, unstaged: { 'file.txt': { insertions: 3, deletions: 1 } } },
       incomplete: false,
     });
+    provider.dirtyStats.add('/repo');
+    provider.statsInFlight = '/repo';
     const complete = await provider.repositoryData(repository);
+    assert.equal(complete.statsReady, true);
+    assert.equal(complete.insertions, 3);
+    assert.equal(complete.deletions, 1);
     assert.deepEqual(
       [complete.unstaged[0].insertions, complete.unstaged[0].deletions],
       [3, 1],
@@ -776,5 +795,30 @@ test('generation posts its result and clears activity even while an error toast 
   } finally {
     ai.generateCommitMessage = generate;
     errorHandler = undefined;
+  }
+});
+
+
+test('file stats keep modified counts and omit added, deleted and untracked counts', () => {
+  const markup = html();
+  const script = markup.slice(markup.indexOf('    function setFileStats('), markup.indexOf('    function el('));
+  const context = vm.createContext({ el: (tag, className, text) => ({ className, text }) });
+  vm.runInContext(script, context);
+  const node = {
+    children: [], dataset: {},
+    replaceChildren() { this.children = []; },
+    append(...children) { this.children.push(...children); },
+  };
+  for (const badge of ['M', 'R', 'C', '!']) {
+    context.setFileStats(node, { insertions: 21, deletions: 3 }, true, badge);
+    assert.deepEqual(node.children.map(child => child.text), ['+21', '−3']);
+  }
+  for (const badge of ['A', 'D', 'U']) {
+    node.dataset.tooltip = 'Line counts unavailable';
+    context.setFileStats(node, { insertions: 21, deletions: 3 }, true, badge);
+    assert.equal(node.children.length, 0);
+    assert.equal(node.dataset.tooltip, undefined);
+    context.setFileStats(node, undefined, true, badge);
+    assert.equal(node.children.length, 0);
   }
 });

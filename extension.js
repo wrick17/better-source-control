@@ -1057,8 +1057,7 @@ class RepositoryViewProvider {
 
   async repositoryData(repository) {
     const id = repository.rootUri.fsPath;
-    const stats = this.dirtyStats.has(id) || this.statsInFlight === id
-      ? undefined : this.stats.get(id);
+    const stats = this.stats.get(id);
     const isExpanded = this.expanded.has(repository.rootUri.fsPath);
     const files = changedFileCount(repository.state);
     const operation = await git.operationState(repository, { gitPath: this.api.git?.path });
@@ -1350,7 +1349,8 @@ function html() {
     .tree .file { padding-left: 17px; }
     .file-icon { width: 16px; height: 16px; flex: none; object-fit: contain; }
     .folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .folder { color: var(--vscode-foreground); }
+    .folder { color: var(--vscode-foreground); cursor: pointer; }
+    .folder:focus-visible { outline: 1px solid var(--vscode-list-focusOutline); outline-offset: -1px; }
     .graph-panel { min-height: 160px; flex: 0 0 clamp(220px, 45vh, 520px); display: flex; flex-direction: column; border-top: 1px solid var(--vscode-panelSection-border, var(--vscode-sideBarSectionHeader-border)); background: var(--vscode-sideBar-background); }
     .graph-panel.collapsed { min-height: 28px; flex-basis: 28px !important; }
     .graph-resizer { position: relative; height: 7px; flex: none; cursor: row-resize; touch-action: none; }
@@ -1429,6 +1429,7 @@ function html() {
     const pendingGenerated = new Map();
     const busy = new Map();
     const collapsedGroups = new Set();
+    const collapsedFolders = new Set();
     let composing = false;
     let pendingRender = false;
     let draggedRepositoryId;
@@ -1593,7 +1594,7 @@ function html() {
         const entries = data.files?.[file.dataset.kind];
         const count = entries && Object.hasOwn(entries, file.dataset.relativePath)
           ? entries[file.dataset.relativePath] : undefined;
-        setFileStats(file.querySelector('.stats'), count, true);
+        setFileStats(file.querySelector('.stats'), count, true, file.dataset.badge);
       });
       const details = section?.querySelector('.details');
       const warning = details?.querySelector('.stats-warning');
@@ -1602,9 +1603,11 @@ function html() {
       } else if (!data.incomplete) warning?.remove();
     }
 
-    function setFileStats(node, count, ready) {
+    function setFileStats(node, count, ready, badge) {
       if (!node) return;
       node.replaceChildren();
+      delete node.dataset.tooltip;
+      if (['A', 'D', 'U'].includes(badge)) return;
       if (!count) {
         if (ready) {
           node.append(el('span', 'stats-unavailable', '?'));
@@ -1612,7 +1615,6 @@ function html() {
         }
         return;
       }
-      delete node.dataset.tooltip;
       node.append(el('span', 'add', '+' + count.insertions), el('span', 'del', '−' + count.deletions));
     }
 
@@ -2180,10 +2182,30 @@ function html() {
         }
         const name = el('span', 'folder-name', names.join('/'));
         name.dataset.tooltip = names.join('/');
-        folder.append(icon('down', 'icon', 'Folder expanded'), resourceIcon(node, 'folder'), name);
+        const key = JSON.stringify([repository.id, kind, node.relativePath]);
+        const collapsed = collapsedFolders.has(key);
+        folder.tabIndex = 0;
+        folder.setAttribute('role', 'button');
+        folder.setAttribute('aria-expanded', String(!collapsed));
+        const arrow = icon('chevron', 'icon group-chevron' + (collapsed ? '' : ' open'));
+        folder.append(arrow, resourceIcon(node, 'folder'), name);
         wrapper.append(folder);
         const children = el('div', 'tree');
+        children.hidden = collapsed;
         branch.children.forEach((child) => children.append(renderNode(repository, kind, child)));
+        const toggle = () => {
+          children.hidden = !children.hidden;
+          children.hidden ? collapsedFolders.add(key) : collapsedFolders.delete(key);
+          folder.setAttribute('aria-expanded', String(!children.hidden));
+          arrow.classList.toggle('open', !children.hidden);
+        };
+        folder.addEventListener('click', toggle);
+        folder.addEventListener('keydown', (event) => {
+          if (event.target === folder && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault();
+            toggle();
+          }
+        });
         wrapper.append(children);
         return wrapper;
       }
@@ -2191,6 +2213,7 @@ function html() {
       const file = el('div', 'file');
       file.tabIndex = 0;
       file.dataset.kind = kind;
+      file.dataset.badge = node.badge;
       file.dataset.relativePath = node.relativePath;
       file.addEventListener('click', () => filePost('diff', repository, kind, node));
       file.addEventListener('keydown', (event) => {
@@ -2208,7 +2231,7 @@ function html() {
         file.append(directory);
       }
       const stats = el('span', 'stats');
-      setFileStats(stats, node.insertions === undefined ? undefined : node, repository.statsReady);
+      setFileStats(stats, node.insertions === undefined ? undefined : node, repository.statsReady, node.badge);
       const actions = el('span', 'file-actions');
       if (node.canOpen) {
         actions.append(button('file', 'Open File', () => filePost('open', repository, kind, node)));
@@ -2599,7 +2622,7 @@ function html() {
             fileActions.append(button('file', 'Open file at this commit', () => graphFilePost('graphFileOpen', commit, file)));
           }
           const stats = el('span', 'stats');
-          stats.append(el('span', 'add', '+' + file.insertions), el('span', 'del', '−' + file.deletions));
+          setFileStats(stats, file, true, file.badge);
           row.append(fileActions, stats, el('span', 'badge badge-' + file.badge, file.badge));
           details.append(row);
         });

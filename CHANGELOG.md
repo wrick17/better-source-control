@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.6 — 2026-10-01
+
+### Fixed
+
+- Keep repository and file line counts visible during refreshes, and prevent background counts from rewriting the Git index.
+- Show per-file counts for modified files while omitting added, deleted, and untracked file counts. Repository totals include all changes.
+- Make tree folders collapsible with mouse and keyboard controls, preserving their state across refreshes.
+
 ## 1.1.5 — 2026-10-01
 
 ### Changed

@@ -97,3 +97,22 @@ test('collects staged, unstaged and untracked counts in two Git diffs', async (t
   assert.equal(unavailable.incomplete, true);
   assert.equal(unavailable.files.staged['tracked.txt'], undefined);
 });
+
+
+test('background counts do not refresh the Git index', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'repository-stats-index-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root });
+  git('init', '-q');
+  fs.writeFileSync(path.join(root, 'unchanged.txt'), 'same\n');
+  fs.writeFileSync(path.join(root, 'changed.txt'), 'before\n');
+  git('add', '-A');
+  git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base');
+  const later = new Date(Date.now() + 5000);
+  fs.utimesSync(path.join(root, 'unchanged.txt'), later, later);
+  fs.writeFileSync(path.join(root, 'changed.txt'), 'after\n');
+  const index = fs.readFileSync(path.join(root, '.git/index'));
+  const stats = await collectStats({ rootUri: { fsPath: root }, state: {} }, { gitPath: 'git' });
+  assert.deepEqual(stats.files.unstaged['changed.txt'], { insertions: 1, deletions: 1 });
+  assert.deepEqual(fs.readFileSync(path.join(root, '.git/index')), index);
+});

@@ -73,7 +73,8 @@ async function collectStats(repository, { gitPath } = {}) {
     ['unstaged', ['diff', '--numstat', '-z', '--no-ext-diff', '--no-textconv', '--']],
   ]) {
     try {
-      const { stdout } = await execGitCommand(repository, gitPath, args, {
+      // Keep background reads from rewriting the index and triggering repository refreshes.
+      const { stdout } = await execGitCommand(repository, gitPath, ['-c', 'diff.autoRefreshIndex=false', ...args], {
         encoding: 'buffer', maxBuffer: 16 * 1024 * 1024, timeout: 30_000,
       });
       files[kind] = parseNumstat(stdout);

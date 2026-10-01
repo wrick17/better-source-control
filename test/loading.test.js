@@ -822,3 +822,28 @@ test('file stats keep modified counts and omit added, deleted and untracked coun
     assert.equal(node.children.length, 0);
   }
 });
+
+test('delivers stats when the Git API returns fresh repository wrappers', async () => {
+  const change = { uri: { toString: () => 'file:///repo/file.txt' } };
+  const state = { mergeChanges: [], indexChanges: [], workingTreeChanges: [change], untrackedChanges: [] };
+  let open = true;
+  const api = { get repositories() { return open ? [{ rootUri: { fsPath: '/repo' }, state }] : []; } };
+  const posts = [];
+  const counts = { insertions: 21, deletions: 3, files: { staged: {}, unstaged: {} }, incomplete: false };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api, dirtyStats: new Set(['/repo']), stats: new Map(),
+    view: { webview: { postMessage: async (message) => posts.push(message) } },
+    computeStats: async () => counts,
+  });
+  assert.notEqual(provider.repository('/repo'), provider.repository('/repo'));
+  await provider.updateStats();
+  assert.equal(posts.length, 1, 'Completed counts must reach the webview');
+  assert.equal(posts[0].insertions, 21);
+  assert.equal(posts[0].deletions, 3);
+  assert.equal(provider.stats.get('/repo'), counts);
+  posts.length = 0;
+  provider.dirtyStats.add('/repo');
+  provider.computeStats = async () => { open = false; return counts; };
+  await provider.updateStats();
+  assert.equal(posts.length, 0, 'Closed repositories must not receive stale counts');
+});

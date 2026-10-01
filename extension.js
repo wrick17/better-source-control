@@ -267,7 +267,8 @@ class RepositoryViewProvider {
         stats = { insertions: 0, deletions: 0, files: { staged: {}, unstaged: {} }, incomplete: true };
       }
       this.statsInFlight = undefined;
-      if (this.dirtyStats.has(id) || this.repository(id) !== repository) continue;
+      // Git API lookups return fresh wrappers; repository identity is its root path.
+      if (this.dirtyStats.has(id) || !this.repository(id)) continue;
       this.stats.set(id, stats);
       await this.view?.webview.postMessage({
         type: 'stats',

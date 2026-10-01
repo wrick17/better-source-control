@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.7 — 2026-10-01
+
+### Fixed
+
+- Deliver repository and file line counts when the built-in Git API returns fresh repository wrappers, instead of discarding every completed result as stale.
+
 ## 1.1.6 — 2026-10-01
 
 ### Fixed

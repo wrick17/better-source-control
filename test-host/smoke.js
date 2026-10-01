@@ -63,11 +63,27 @@ async function run() {
     });
     assert.equal(provider.busyRepositories.has(root), false);
     assert.deepEqual(messages.filter((message) => message.type === 'busy').map((message) => message.busy), [true, false]);
+    fs.writeFileSync(file, 'stats after commit\n');
+    await repository.status();
+    await provider.refresh();
+    await provider.statsWorker;
+    const stats = provider.stats.get(root);
+    assert.ok(stats, 'Real Git API wrappers must not discard completed stats');
+    assert.equal(stats.insertions, 1);
+    assert.equal(stats.deletions, 1);
+    const update = messages.find((message) => message.type === 'stats' && message.repositoryId === root);
+    assert.ok(update, 'Stats must be delivered to the webview');
+    assert.equal(update.files.unstaged['sample.txt'].insertions, 1);
+    assert.equal(update.files.unstaged['sample.txt'].deletions, 1);
+    const row = await provider.repositoryData(api.repositories.find(item => item.rootUri.fsPath === root));
+    assert.equal(row.statsReady, true);
+    assert.equal(row.insertions, 1);
+    assert.equal(row.deletions, 1);
   } finally {
     provider.dispose();
   }
   fs.writeFileSync(process.env.BSC_SMOKE_RESULT, 'passed\n');
-  console.log('Extension-host smoke passed: activation, status, diff, stage, commit, rejected operation.');
+  console.log('Extension-host smoke passed: activation, status, diff, stage, commit, rejected operation, asynchronous repository/file stats.');
 }
 
 module.exports = { run };

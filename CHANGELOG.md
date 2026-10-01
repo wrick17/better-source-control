@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.4 — 2026-10-01
+
+### Changed
+
+- Remove vertical indentation guides from repository details and the changes tree.
+
 ## 1.1.3 — 2026-10-01
 
 ### Fixed

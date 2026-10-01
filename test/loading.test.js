@@ -127,7 +127,7 @@ test('tree rows use one compact indent per level and aligned file/folder columns
   visit(group);
   assert.deepEqual(levels, { 'deep.js': 3, 'child.js': 2, 'root.js': 1 });
   assert.match(markup, /\.tree \{[^}]*margin-left: 8px;/);
-  assert.match(markup, /\.tree::before \{[^}]*left: -2px;/);
+  assert.doesNotMatch(markup, /tree-indentGuidesStroke|\.tree::before/);
   assert.match(markup, /\.tree \.file \{ padding-left: 17px; \}/);
   assert.match(markup, /\.tree \.badge \{ width: 13px; \}/);
   context.model.viewMode = 'list';

@@ -1273,7 +1273,7 @@ function html() {
     .menu-item { width: 100%; height: 24px; display: flex; align-items: center; padding: 0 6px; border: 0; border-radius: 3px; color: inherit; background: transparent; cursor: pointer; text-align: left; }
     .menu-item:hover, .menu-item:focus-visible { outline: none; color: var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground)); background: var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground)); }
     .menu-separator { height: 1px; margin: 4px 6px; background: var(--vscode-menu-separatorBackground, var(--vscode-menu-border, var(--vscode-widget-border, transparent))); }
-    .details { margin-left: 0; padding: 2px 4px 4px 5px; border-left: 1px solid var(--vscode-tree-indentGuidesStroke); }
+    .details { margin-left: 0; padding: 2px 4px 4px 6px; }
     .commit { display: grid; grid-template-columns: minmax(0, 1fr) 28px 28px; gap: 4px; margin: 2px 0 6px; }
     .commit.operation-blocked { grid-template-columns: minmax(0, 1fr) 28px 28px 28px; }
     textarea { width: 100%; min-height: 28px; max-height: 78px; resize: vertical; padding: 4px 6px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; outline: none; color: var(--vscode-input-foreground); background: var(--vscode-input-background); }
@@ -1307,8 +1307,7 @@ function html() {
     .file-actions { display: none; margin-left: auto; }
     .file:hover .file-actions, .file:focus-within .file-actions { display: flex; }
     .file:hover .stats, .file:focus-within .stats { margin-left: 0; }
-    .tree { position: relative; margin-left: 8px; }
-    .tree::before { content: ''; position: absolute; top: 0; bottom: 0; left: -2px; border-left: 1px solid var(--vscode-tree-indentGuidesStroke); pointer-events: none; }
+    .tree { margin-left: 8px; }
     .tree .file { padding-left: 17px; }
     .tree .badge { width: 13px; }
     .folder { color: var(--vscode-descriptionForeground); }

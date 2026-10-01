@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const Module = require('node:module');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const load = Module._load;
 const executedCommands = [];
@@ -94,6 +95,44 @@ test('waits for the Git API before rendering repositories', async () => {
 
   assert.equal(posts.at(-1).loading, false);
   assert.equal(posts.at(-1).repositories[0].name, 'repo');
+});
+
+test('tree rows use one compact indent per level and aligned file/folder columns', () => {
+  const markup = html();
+  const script = markup.slice(markup.indexOf('    function renderGroup('), markup.indexOf('    function renderGraph('));
+  const el = (tag, className = '', text) => ({
+    tag, className, text, children: [], dataset: {},
+    append(...nodes) { this.children.push(...nodes); },
+    setAttribute() {}, addEventListener() {},
+  });
+  const context = vm.createContext({
+    el, icon: (name, className) => el('svg', className), button: () => el('button'),
+    document: { createTextNode: (text) => el('#text', '', text) },
+    model: { viewMode: 'tree' }, collapsedGroups: new Set(),
+    countFiles: () => 3, setFileStats() {},
+  });
+  vm.runInContext(script, context);
+  const file = (name) => ({ type: 'file', name, relativePath: name, badge: 'M' });
+  const folder = (name, children) => ({ type: 'folder', name, children });
+  const repository = { id: '/repo', unstaged: [
+    folder('src', [folder('nested', [file('deep.js')]), file('child.js')]), file('root.js'),
+  ] };
+  const group = context.renderGroup(repository, 'unstaged', 'Changes');
+  const levels = {};
+  function visit(node, depth = 0) {
+    if (node.className === 'tree') depth++;
+    if (node.className === 'file') levels[node.dataset.relativePath] = depth;
+    node.children.forEach((child) => visit(child, depth));
+  }
+  visit(group);
+  assert.deepEqual(levels, { 'deep.js': 3, 'child.js': 2, 'root.js': 1 });
+  assert.match(markup, /\.tree \{[^}]*margin-left: 8px;/);
+  assert.match(markup, /\.tree::before \{[^}]*left: -2px;/);
+  assert.match(markup, /\.tree \.file \{ padding-left: 17px; \}/);
+  assert.match(markup, /\.tree \.badge \{ width: 13px; \}/);
+  context.model.viewMode = 'list';
+  const list = context.renderGroup({ id: '/repo', unstaged: [file('root.js')] }, 'unstaged', 'Changes');
+  assert.equal(list.children[1].className, 'file');
 });
 
 test('generates valid webview JavaScript', () => {

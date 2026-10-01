@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.3 — 2026-10-01
+
+### Fixed
+
+- Align file and folder labels, arrows, and indentation guides in the changes tree, with compact 8 px indentation per level.
+
 ## 1.1.2 — 2026-09-28
 
 ### Added

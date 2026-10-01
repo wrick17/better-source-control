@@ -1307,7 +1307,10 @@ function html() {
     .file-actions { display: none; margin-left: auto; }
     .file:hover .file-actions, .file:focus-within .file-actions { display: flex; }
     .file:hover .stats, .file:focus-within .stats { margin-left: 0; }
-    .tree { margin-left: 14px; border-left: 1px solid var(--vscode-tree-indentGuidesStroke); padding-left: 5px; }
+    .tree { position: relative; margin-left: 8px; }
+    .tree::before { content: ''; position: absolute; top: 0; bottom: 0; left: -2px; border-left: 1px solid var(--vscode-tree-indentGuidesStroke); pointer-events: none; }
+    .tree .file { padding-left: 17px; }
+    .tree .badge { width: 13px; }
     .folder { color: var(--vscode-descriptionForeground); }
     .graph-panel { min-height: 160px; flex: 0 0 clamp(220px, 45vh, 520px); display: flex; flex-direction: column; border-top: 1px solid var(--vscode-panelSection-border, var(--vscode-sideBarSectionHeader-border)); background: var(--vscode-sideBar-background); }
     .graph-panel.collapsed { min-height: 28px; flex-basis: 28px !important; }
@@ -2118,18 +2121,22 @@ function html() {
         el('span', 'count', String(countFiles(nodes))),
       );
       group.append(heading);
-      if (!collapsed) nodes.forEach((node) => group.append(renderNode(repository, kind, node, 0)));
+      if (!collapsed) {
+        const contents = model.viewMode === 'tree' ? el('div', 'tree') : group;
+        nodes.forEach((node) => contents.append(renderNode(repository, kind, node)));
+        if (contents !== group) group.append(contents);
+      }
       return group;
     }
 
-    function renderNode(repository, kind, node, depth) {
+    function renderNode(repository, kind, node) {
       if (node.type === 'folder') {
-        const wrapper = el('div', depth ? 'tree' : '');
+        const wrapper = el('div');
         const folder = el('div', 'folder');
         folder.append(icon('down', 'icon', 'Folder expanded'), icon('folder', 'icon', 'Folder ' + node.name), document.createTextNode(node.name));
         wrapper.append(folder);
         const children = el('div', 'tree');
-        node.children.forEach((child) => children.append(renderNode(repository, kind, child, depth + 1)));
+        node.children.forEach((child) => children.append(renderNode(repository, kind, child)));
         wrapper.append(children);
         return wrapper;
       }

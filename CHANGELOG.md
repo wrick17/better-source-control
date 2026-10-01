@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.9 — 2026-10-01
+
+### Added
+
+- Show the total changed-file count on the Better Source Control activity-bar icon, clearing the badge when all repositories are clean.
+
 ## 1.1.8 — 2026-10-01
 
 ### Changed

@@ -37,6 +37,23 @@ async function run() {
   await repository.status();
   const change = repository.state.workingTreeChanges.find((item) => item.uri.fsPath === file);
   assert.ok(change, 'Git API did not report the edit');
+  let liveProvider;
+  const resolveView = RepositoryViewProvider.prototype.resolveWebviewView;
+  RepositoryViewProvider.prototype.resolveWebviewView = function (view) {
+    liveProvider = this;
+    return resolveView.call(this, view);
+  };
+  try {
+    await vscode.commands.executeCommand('gitChangeStats.repositories.focus');
+    for (let attempt = 0; attempt < 100 && !liveProvider; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  } finally {
+    RepositoryViewProvider.prototype.resolveWebviewView = resolveView;
+  }
+  assert.ok(liveProvider, 'Native Better Source Control webview did not resolve');
+  await liveProvider.refresh();
+  assert.equal(liveProvider.view.badge.value, 1, 'Native webview badge must show changed files');
   await openDiff(api, repository, 'unstaged', change);
   assert.ok(vscode.window.tabGroups.all.some((group) => group.tabs.some((tab) =>
     tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.fsPath === file)),
@@ -48,6 +65,8 @@ async function run() {
   await repository.status();
   assert.notEqual(repository.state.HEAD.commit, process.env.BSC_SMOKE_INITIAL_HEAD);
   assert.equal(repository.state.indexChanges.length, 0);
+  await liveProvider.refresh();
+  assert.equal(liveProvider.view.badge, undefined, 'Native badge must clear after committing');
 
   const context = {
     globalState: { get: (_, fallback) => fallback },
@@ -79,11 +98,16 @@ async function run() {
     assert.equal(row.statsReady, true);
     assert.equal(row.insertions, 1);
     assert.equal(row.deletions, 1);
+    assert.equal(provider.view.badge.value, 1);
+    fs.writeFileSync(file, 'after\n');
+    await repository.status();
+    await provider.refresh();
+    assert.equal(provider.view.badge, undefined);
   } finally {
     provider.dispose();
   }
   fs.writeFileSync(process.env.BSC_SMOKE_RESULT, 'passed\n');
-  console.log('Extension-host smoke passed: activation, status, diff, stage, commit, rejected operation, asynchronous repository/file stats.');
+  console.log('Extension-host smoke passed: activation, status, diff, stage, commit, rejected operation, asynchronous repository/file stats, native activity badge.');
 }
 
 module.exports = { run };

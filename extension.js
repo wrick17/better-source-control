@@ -106,6 +106,11 @@ class RepositoryViewProvider {
     view.webview.options = { enableScripts: true, localResourceRoots: [] };
     view.webview.onDidReceiveMessage((message) => this.receiveMessage(message));
     view.onDidChangeVisibility(() => view.visible && this.refresh());
+    view.onDidDispose(() => {
+      if (this.view !== view) return;
+      this.view = undefined;
+      this.refreshId = (this.refreshId ?? 0) + 1;
+    });
     view.webview.html = html();
   }
 
@@ -186,6 +191,9 @@ class RepositoryViewProvider {
   async refresh() {
     clearTimeout(this.refreshTimer);
     if (!this.view) return;
+    const files = this.api.state === 'initialized'
+      ? this.api.repositories.reduce((total, repository) => total + changedFileCount(repository.state), 0) : 0;
+    this.view.badge = files ? { value: files, tooltip: `${files} changed ${files === 1 ? 'file' : 'files'}` } : undefined;
     const refreshId = this.refreshId = (this.refreshId ?? 0) + 1;
     if (this.api.state !== 'initialized') {
       await this.view.webview.postMessage({ type: 'render', loading: true, repositories: [] });

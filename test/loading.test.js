@@ -847,3 +847,51 @@ test('delivers stats when the Git API returns fresh repository wrappers', async 
   await provider.updateStats();
   assert.equal(posts.length, 0, 'Closed repositories must not receive stale counts');
 });
+
+test('activity badge totals unique changed files across repositories and clears at zero', async () => {
+  const change = uri => ({ uri: { toString: () => uri } });
+  const state = (indexChanges = [], workingTreeChanges = [], untrackedChanges = [], mergeChanges = []) => ({
+    indexChanges, workingTreeChanges, untrackedChanges, mergeChanges,
+  });
+  const first = { rootUri: { fsPath: '/a' }, state: state([change('/a/one')], [change('/a/one')], [change('/a/new')]) };
+  const second = { rootUri: { fsPath: '/b' }, state: state([], [], [], [change('/b/conflict')]) };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [first, second] },
+    view: { visible: false, webview: { postMessage: async () => {} } },
+    expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    repositoryData: async () => ({}), scheduleStats() {},
+  });
+  await provider.refresh();
+  assert.deepEqual(provider.view.badge, { value: 3, tooltip: '3 changed files' });
+  provider.api.repositories = [second];
+  await provider.refresh();
+  assert.deepEqual(provider.view.badge, { value: 1, tooltip: '1 changed file' });
+  second.state = state();
+  await provider.refresh();
+  assert.equal(provider.view.badge, undefined);
+  second.state = state([], [change('/b/file')]);
+  await provider.refresh();
+  assert.equal(provider.view.badge.value, 1);
+  provider.api.state = 'uninitialized';
+  await provider.refresh();
+  assert.equal(provider.view.badge, undefined);
+});
+
+
+test('disposing the current webview cancels refreshes without clearing its replacement', () => {
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), { refreshId: 1 });
+  const view = () => ({
+    webview: { onDidReceiveMessage() {} }, onDidChangeVisibility() {},
+    onDidDispose(listener) { this.dispose = listener; },
+  });
+  const old = view();
+  provider.resolveWebviewView(old);
+  const current = view();
+  provider.resolveWebviewView(current);
+  old.dispose();
+  assert.equal(provider.view, current);
+  assert.equal(provider.refreshId, 1);
+  current.dispose();
+  assert.equal(provider.view, undefined);
+  assert.equal(provider.refreshId, 2);
+});

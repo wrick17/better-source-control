@@ -174,7 +174,7 @@ test('generates valid webview JavaScript', () => {
   assert.doesNotThrow(() => new Function(script));
   assert.doesNotMatch(script, /\.title\s*=/);
   assert.match(markup, /\.custom-tooltip \{/);
-  assert.match(markup, /delay = tooltip\.classList\.contains\('visible'\) \? 0 : 1000/);
+  assert.match(markup, /delay = tooltip\.classList\.contains\('visible'\) \? 0 : 500/);
   assert.match(markup, /const nextTarget = event\.relatedTarget\?\.closest\?\.\('\[data-tooltip\]'\)/);
   assert.match(markup, /\.file-name \{ flex: none; \}/);
   assert.match(markup, /directory\.dataset\.tooltip = (node|file)\.directory/);

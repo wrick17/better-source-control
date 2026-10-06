@@ -1390,16 +1390,16 @@ function html() {
     .graph-row.selected { color: var(--vscode-list-inactiveSelectionForeground); background: var(--vscode-list-inactiveSelectionBackground); }
     .graph-row:focus-visible { outline: 1px solid var(--vscode-list-focusOutline); outline-offset: -1px; }
     .graph-lanes { height: 22px; flex: none; overflow: visible; }
-    .graph-subject { min-width: 40px; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .graph-subject { min-width: 40px; flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .graph-author, .graph-date { min-width: 0; overflow: hidden; color: var(--vscode-descriptionForeground); text-overflow: ellipsis; white-space: nowrap; }
-    .graph-author { max-width: 105px; flex: 1 1 105px; }
+    .graph-author { max-width: 53px; flex: 1 1 53px; }
     .graph-author-link { padding: 0; border: 0; overflow: hidden; color: inherit; background: transparent; cursor: pointer; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
     .graph-author-link:hover { color: var(--vscode-foreground); text-decoration: underline; }
     .graph-author-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
     .graph-date { min-width: max-content; flex: none; font-size: 11px; }
-    .graph-commit-meta { min-width: 0; display: flex; flex: 0 1 auto; align-items: center; gap: 5px; margin-left: auto; }
+    .graph-commit-meta { min-width: 0; max-width: 60%; display: flex; flex: 0 1 auto; align-items: center; gap: 5px; margin-left: auto; }
     .graph-refs { min-width: 0; display: flex; flex: 1 1 auto; gap: 3px; overflow: hidden; }
-    .graph-ref { min-width: 0; max-width: 110px; flex: 0 1 auto; padding: 0 5px; border-radius: 8px; overflow: hidden; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); font-size: 10px; line-height: 16px; pointer-events: none; text-overflow: ellipsis; user-select: none; white-space: nowrap; }
+    .graph-ref { min-width: 0; max-width: 180px; flex: 0 1 auto; padding: 0 5px; border-radius: 8px; overflow: hidden; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); font-size: 10px; line-height: 16px; text-overflow: ellipsis; user-select: none; white-space: nowrap; }
     .graph-ref.remote { color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 20%, transparent); }
     .graph-ref.tag { color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-charts-orange, #d18616) 20%, transparent); }
     .graph-ref.current { outline: 1px solid var(--vscode-focusBorder); }
@@ -1654,7 +1654,7 @@ function html() {
       tooltip.classList.remove('visible');
     }
 
-    function showTooltip(target, delay = tooltip.classList.contains('visible') ? 0 : 1000) {
+    function showTooltip(target, delay = tooltip.classList.contains('visible') ? 0 : 500) {
       hideTooltip();
       if (!target?.dataset.tooltip || target.getAttribute('aria-expanded') === 'true') return;
       tooltipTarget = target;
@@ -2473,6 +2473,7 @@ function html() {
         const badges = el('span', 'graph-refs');
         refs.slice(0, 3).forEach((ref) => {
           const badge = el('span', 'graph-ref ' + ref.type + (ref.current ? ' current' : ''), ref.name);
+          badge.dataset.tooltip = ref.name;
           badges.append(badge);
         });
         if (refs.length > 3) badges.dataset.tooltip = refs.map((ref) => ref.name).join(', ');
@@ -2647,7 +2648,7 @@ function html() {
     function graphAuthor(commit, className = '') {
       const author = el('button', (className + ' graph-author-link').trim(), commit.author);
       author.type = 'button';
-      author.dataset.tooltip = 'Open GitHub profile';
+      author.dataset.tooltip = commit.author;
       author.setAttribute('aria-label', 'Open GitHub profile for ' + commit.author);
       author.addEventListener('click', () => graphPost('graphOpenAuthor', commit));
       return author;

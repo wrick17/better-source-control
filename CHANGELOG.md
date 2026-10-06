@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.10 — 2026-10-06
+
+### Fixed
+
+- Show full branch, remote, and tag names in commit graph pill tooltips.
+- Give ref pills more room by reducing the author label to half its previous width, with the full author name in a tooltip.
+- Reduce the initial tooltip delay to 500 ms.
+
 ## 1.1.9 — 2026-10-01
 
 ### Added

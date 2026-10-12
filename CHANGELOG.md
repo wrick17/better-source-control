@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.12 — 2026-10-12
+
+### Fixed
+
+- Render repository details and change groups ahead of expansion, keeping hidden rows ready so the first click only changes visibility.
+- Reuse unchanged repository views during refreshes, preserving drafts, focus, and expansion choices.
+- Avoid redundant repository refreshes when opening files or diffs.
+
 ## 1.1.11 — 2026-10-12
 
 ### Added

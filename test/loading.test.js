@@ -97,6 +97,134 @@ test('waits for the Git API before rendering repositories', async () => {
   assert.equal(posts.at(-1).repositories[0].name, 'repo');
 });
 
+test('repository expansion never waits for repository reads, including expand/collapse all', async () => {
+  const posts = [];
+  let reads = 0;
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: { workingTreeChanges: [{ uri: { toString: () => '/repo/file' } }] },
+  };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [repository] },
+    view: { webview: { postMessage: async (message) => posts.push(message) } },
+    expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    repositoryData: async () => { reads++; return { id: '/repo' }; },
+    scheduleStats() {},
+  });
+  await provider.handleMessage({ type: 'toggle', repositoryId: '/repo', expanded: true });
+  await provider.handleMessage({ type: 'toggle', repositoryId: '/repo', expanded: true });
+  assert.ok(provider.expanded.has('/repo'), 'Repeated expansion messages must be idempotent');
+  await provider.handleMessage({ type: 'toggle', repositoryId: '/repo', expanded: false });
+  await provider.expandAll();
+  await provider.collapseAll();
+  assert.equal(reads, 0, 'Expanding and collapsing must not read Git or rebuild file models');
+  assert.equal(provider.expanded.size, 0);
+  assert.ok(posts.every((message) => message.type === 'expansion'));
+});
+
+test('repository details are pre-rendered and the first click only changes visibility', () => {
+  const markup = html();
+  const posts = [];
+  let detailRenders = 0;
+  const el = (tag, className = '') => ({
+    tag, className, children: [], dataset: {}, attributes: {}, listeners: {},
+    append(...nodes) { this.children.push(...nodes); },
+    setAttribute(key, value) { this.attributes[key] = value; },
+    addEventListener(key, listener) { this.listeners[key] = listener; },
+    querySelector(selector) {
+      const find = (node) => node.className.split(' ').includes(selector.slice(1))
+        ? node : node.children.map(find).find(Boolean);
+      return find(this);
+    },
+    classList: { toggle() {} },
+  });
+  const root = el('main');
+  const repository = { id: '/repo', name: 'repo', branch: 'main', expandable: true };
+  const context = vm.createContext({
+    el, root, model: { repositories: [repository], expanded: [] }, busy: new Map(),
+    expansionOverrides: new Map(),
+    icon: (_, className) => el('svg', className), button: () => el('button'),
+    menuItem: () => el('button'), menuSeparator: () => el('hr'), hideTooltip() {},
+    clearDropState() {},
+    renderDetails() { detailRenders++; return el('div', 'details'); },
+    suppressToggleUntil: 0, vscode: { postMessage: (message) => posts.push(message) },
+  });
+  vm.runInContext(
+    markup.slice(markup.indexOf('    function repositorySection('), markup.indexOf('    function persistDrafts('))
+      + markup.slice(markup.indexOf('    function renderRepository('), markup.indexOf('    function renderDetails(')),
+    context,
+  );
+  const section = context.renderRepository(repository);
+  root.append(section);
+  const details = section.querySelector('.details');
+  const row = section.querySelector('.repo-row');
+  assert.ok(details, 'Collapsed repository details must already exist');
+  assert.equal(details.hidden, true);
+  row.listeners.click();
+  assert.equal(details.hidden, false, 'First click must expand synchronously');
+  let prevented = false;
+  row.listeners.keydown({ target: row, key: ' ', preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(details.hidden, true);
+  assert.equal(section.querySelector('.details'), details);
+  assert.equal(detailRenders, 1, 'Disclosures must not rebuild details');
+  assert.deepEqual(posts.map((message) => message.expanded), [true, false]);
+});
+
+test('refreshes preserve local disclosures while still allowing automatic expansion', () => {
+  const markup = html();
+  let receive;
+  const repository = { id: '/repo' };
+  const context = vm.createContext({
+    model: { repositories: [repository], expanded: [] }, expansionOverrides: new Map(),
+    window: { addEventListener: (_, callback) => { receive = callback; } },
+    render() {},
+    setRepositoryExpanded(item, expanded) { context.model.expanded = expanded ? [item.id] : []; },
+  });
+  vm.runInContext(markup.slice(markup.indexOf("    window.addEventListener('message'"),
+    markup.indexOf('    function repositorySection(')), context);
+  const refresh = (expanded) => receive({ data: {
+    type: 'render', loading: false, repositories: [repository], expanded,
+  } });
+  refresh(['/repo']);
+  assert.deepEqual([...context.model.expanded], ['/repo'], 'Untouched repositories may auto-expand');
+  context.expansionOverrides.set('/repo', false);
+  refresh(['/repo']);
+  assert.deepEqual([...context.model.expanded], [], 'Stale host expansion must not undo a local collapse');
+  context.expansionOverrides.set('/repo', true);
+  refresh([]);
+  assert.deepEqual([...context.model.expanded], ['/repo'], 'Stale host collapse must not undo a local expansion');
+  receive({ data: { type: 'expansion', expanded: [] } });
+  refresh(['/repo']);
+  assert.deepEqual([...context.model.expanded], [], 'Toolbar choices must also survive refreshes');
+});
+
+test('generated messages enable Commit in retained collapsed repository details', () => {
+  const markup = html();
+  const input = { value: '' };
+  const commit = { disabled: true };
+  const details = { hidden: true };
+  const section = {
+    setAttribute() {},
+    querySelector: (selector) => ({
+      textarea: input, '[data-action="commit"]': commit, '.details': details,
+    })[selector],
+  };
+  const context = vm.createContext({
+    composing: false, pendingGenerated: new Map(),
+    generatingDrafts: new Map([['/repo', '']]), messages: new Map(), busy: new Map(),
+    model: { repositories: [{ id: '/repo' }] }, document: { activeElement: undefined },
+    repositorySection: () => section, persistDrafts() {},
+  });
+  vm.runInContext(markup.slice(markup.indexOf('    function applyGeneratedMessage('),
+    markup.indexOf('    function updateGenerating(')), context);
+  context.applyGeneratedMessage({ repositoryId: '/repo', message: 'Generated commit' });
+  assert.equal(input.value, 'Generated commit');
+  assert.equal(details.hidden, true, 'Generation must preserve the collapsed view');
+  details.hidden = false;
+  assert.equal(commit.disabled, false, 'Reopening must show an enabled Commit without typing or refreshing');
+});
+
 test('tree rows use one compact indent per level and aligned file/folder columns', () => {
   const markup = html();
   const script = markup.slice(markup.indexOf('    function renderGroup('), markup.indexOf('    function renderGraph('));
@@ -104,6 +232,11 @@ test('tree rows use one compact indent per level and aligned file/folder columns
     tag, className, text, children: [], dataset: {}, attributes: {}, listeners: {},
     classList: { toggle() {} },
     append(...nodes) { this.children.push(...nodes); },
+    querySelector(selector) {
+      const find = (node) => node.className.split(' ').includes(selector.slice(1))
+        ? node : node.children.map(find).find(Boolean);
+      return find(this);
+    },
     setAttribute(key, value) { this.attributes[key] = value; },
     addEventListener(key, listener) { this.listeners[key] = listener; },
   });
@@ -111,7 +244,7 @@ test('tree rows use one compact indent per level and aligned file/folder columns
     el, icon: (name, className) => el('svg', className), button: () => el('button'),
     document: { createTextNode: (text) => el('#text', '', text) },
     model: { viewMode: 'tree' }, collapsedGroups: new Set(), collapsedFolders: new Set(),
-    countFiles: () => 3, setFileStats() {},
+    countFiles: () => 3, setFileStats() {}, hideTooltip() {},
   });
   vm.runInContext(script, context);
   const file = (name) => ({ type: 'file', name, relativePath: name, badge: 'M' });
@@ -155,7 +288,15 @@ test('tree rows use one compact indent per level and aligned file/folder columns
   assert.equal(context.renderNode(repository, 'staged', folder('test', [])).children[1].hidden, false);
   context.model.viewMode = 'list';
   const list = context.renderGroup({ id: '/repo', unstaged: [file('root.js')] }, 'unstaged', 'Changes');
-  assert.equal(list.children[1].className, 'file');
+  assert.equal(list.children[1].className, 'group-content');
+  assert.equal(list.children[1].children[0].className, 'file');
+  const content = list.children[1];
+  const row = content.children[0];
+  list.children[0].listeners.click({ target: { closest: () => undefined } });
+  assert.equal(content.hidden, true);
+  list.children[0].listeners.click({ target: { closest: () => undefined } });
+  assert.equal(content.hidden, false);
+  assert.equal(content.children[0], row, 'Group expansion must reuse existing file rows');
 });
 
 test('untracked files retain an empty original side when showing their U status', async () => {
@@ -183,7 +324,7 @@ test('generates valid webview JavaScript', () => {
   assert.match(markup, /\? 'Conflicted'/);
   assert.match(markup, /repository\.hasConflicts \? '!' : ''/);
   assert.match(markup, /repository\.operation === 'cherry-pick' \? 'cherryPick'/);
-  assert.match(markup, /expanded && repository\.expandable/);
+  assert.match(markup, /details\.hidden = !expanded/);
   assert.match(markup, /section\.inert = Boolean\(progressLabel\)/);
   assert.match(markup, /section\.setAttribute\('aria-busy'/);
   assert.match(markup, /menuItem\('Copy Branch Name'/);
@@ -625,7 +766,7 @@ test('renders changed files from cached batch stats without per-file Git calls',
   };
   const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
     api: { git: { path: '/git' } },
-    expanded: new Set(['/repo']), dirtyStats: new Set(), stats: new Map(), viewMode: 'list',
+    expanded: new Set(), dirtyStats: new Set(), stats: new Map(), viewMode: 'list',
   });
   const operationState = git.operationState;
   git.operationState = async () => undefined;

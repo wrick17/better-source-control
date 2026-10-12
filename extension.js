@@ -301,13 +301,17 @@ class RepositoryViewProvider {
       this.expansionTouched.add(id);
       if (changedFileCount(repository.state)) this.expanded.add(id);
     }
-    await this.refresh();
+    await this.postExpansion();
   }
 
   async collapseAll() {
     for (const repository of this.api.repositories) this.expansionTouched.add(repository.rootUri.fsPath);
     this.expanded.clear();
-    await this.refresh();
+    await this.postExpansion();
+  }
+
+  async postExpansion() {
+    await this.view?.webview.postMessage({ type: 'expansion', expanded: [...this.expanded] });
   }
 
   async reorder(repositoryId, targetId, before) {
@@ -748,11 +752,11 @@ class RepositoryViewProvider {
     }
     const repository = this.repository(message.repositoryId);
     if (message.type === 'toggle') {
+      if (!repository) return;
       this.expansionTouched.add(message.repositoryId);
-      this.expanded.has(message.repositoryId)
-        ? this.expanded.delete(message.repositoryId)
-        : this.expanded.add(message.repositoryId);
-      await this.refresh();
+      message.expanded
+        ? this.expanded.add(message.repositoryId)
+        : this.expanded.delete(message.repositoryId);
       return;
     }
     if (message.type === 'refresh') {
@@ -1054,12 +1058,15 @@ class RepositoryViewProvider {
     } else if (message.type === 'open') {
       const change = findChange(repository, message.kind, message.uri);
       if (change) await openFile(change);
+      return;
     } else if (message.type === 'openAll') {
       const command = message.kind === 'staged' ? 'git.viewStagedChanges' : 'git.viewChanges';
       await vscode.commands.executeCommand(command, repository.rootUri);
+      return;
     } else if (message.type === 'diff') {
       const change = findChange(repository, message.kind, message.uri);
       if (change) await openDiff(this.api, repository, message.kind, change);
+      return;
     }
     await this.refresh();
   }
@@ -1067,21 +1074,17 @@ class RepositoryViewProvider {
   async repositoryData(repository) {
     const id = repository.rootUri.fsPath;
     const stats = this.stats.get(id);
-    const isExpanded = this.expanded.has(repository.rootUri.fsPath);
     const files = changedFileCount(repository.state);
     const operation = await git.operationState(repository, { gitPath: this.api.git?.path });
     const hiddenUntracked = vscode.workspace.getConfiguration('git', repository.rootUri)
       .get('untrackedChanges', 'mixed') === 'hidden';
-    const stagedFiles = isExpanded
-      ? this.fileData(repository, 'staged', repository.state.indexChanges, stats)
-      : [];
-    const workingFiles = isExpanded
-      ? this.fileData(repository, 'unstaged', [
-          ...repository.state.mergeChanges,
-          ...repository.state.workingTreeChanges,
-          ...repository.state.untrackedChanges,
-        ], stats)
-      : [];
+    // Send file models once so opening a repository never needs a Git round trip.
+    const stagedFiles = this.fileData(repository, 'staged', repository.state.indexChanges, stats);
+    const workingFiles = this.fileData(repository, 'unstaged', [
+      ...repository.state.mergeChanges,
+      ...repository.state.workingTreeChanges,
+      ...repository.state.untrackedChanges,
+    ], stats);
 
     const showNoVerifyButton = vscode.workspace.getConfiguration('gitChangeStats')
       .get('showNoVerifyButton', false);
@@ -1291,7 +1294,7 @@ function html() {
     .repo-row:focus-visible { outline: 1px solid var(--vscode-list-focusOutline); outline-offset: -1px; }
     .repo.clean .repo-row { cursor: default; }
     .icon { width: 13px; height: 13px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-    .chevron { width: 14px; height: 14px; flex: none; color: var(--vscode-icon-foreground); transition: transform 100ms ease; }
+    .chevron { width: 14px; height: 14px; flex: none; color: var(--vscode-icon-foreground); }
     .clean-indicator { width: 12px; height: 12px; margin: 1px; color: var(--vscode-gitDecoration-addedResourceForeground); transform: translateY(1px); }
     .expanded .chevron { transform: rotate(90deg); }
     .repo-name { min-width: 40px; flex: 0 1 auto; margin-right: 4px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1333,7 +1336,6 @@ function html() {
     .group + .group { margin-top: 4px; }
     .group-title { height: 22px; display: flex; align-items: center; gap: 5px; color: var(--vscode-foreground); background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent); font-weight: 700; cursor: pointer; }
     .group-title:focus-visible { outline: 1px solid var(--vscode-list-focusOutline); outline-offset: -1px; }
-    .group-chevron { transition: transform 100ms ease; }
     .group-chevron.open { transform: rotate(90deg); }
     .count { min-width: 18px; height: 18px; display: grid; place-items: center; padding: 0 5px; border-radius: 9px; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
     .file, .folder { height: 22px; display: flex; align-items: center; gap: 4px; padding: 0; }
@@ -1443,6 +1445,8 @@ function html() {
     const busy = new Map();
     const collapsedGroups = new Set();
     const collapsedFolders = new Set();
+    const repositoryRenders = new Map();
+    const expansionOverrides = new Map();
     let composing = false;
     let pendingRender = false;
     let draggedRepositoryId;
@@ -1481,7 +1485,23 @@ function html() {
         updateStats(data);
         return;
       } else if (data.type === 'render') {
+        if (!data.loading && !data.error) {
+          const currentIds = new Set(data.repositories.map((repository) => repository.id));
+          const expanded = new Set(data.expanded || []);
+          for (const [id, value] of expansionOverrides) {
+            if (!currentIds.has(id)) expansionOverrides.delete(id);
+            else value ? expanded.add(id) : expanded.delete(id);
+          }
+          data.expanded = [...expanded];
+        }
         model = data;
+      } else if (data.type === 'expansion') {
+        for (const repository of model.repositories) {
+          const expanded = data.expanded.includes(repository.id);
+          expansionOverrides.set(repository.id, expanded);
+          setRepositoryExpanded(repository, expanded);
+        }
+        return;
       } else if (data.type === 'generatedMessage') {
         applyGeneratedMessage(data);
         return;
@@ -1522,6 +1542,26 @@ function html() {
       return [...root.children].find((section) => section.dataset.repositoryId === id);
     }
 
+    function repositorySignature(repository) {
+      return JSON.stringify([model.viewMode, repository]);
+    }
+
+    function setRepositoryExpanded(repository, expanded) {
+      const ids = new Set(model.expanded);
+      expanded ? ids.add(repository.id) : ids.delete(repository.id);
+      model.expanded = [...ids];
+      const section = repositorySection(repository.id);
+      if (!section || !repository.expandable) return;
+      section.classList.toggle('expanded', expanded);
+      const row = section.querySelector('.repo-row');
+      row.setAttribute('aria-expanded', String(expanded));
+      row.querySelector('.chevron')?.setAttribute('aria-label',
+        (expanded ? 'Collapse ' : 'Expand ') + repository.name);
+      const details = section.querySelector('.details');
+      if (details) details.hidden = !expanded;
+      hideTooltip();
+    }
+
     function persistDrafts() {
       vscode.setState({ ...vscode.getState(), graphHeight, drafts: Object.fromEntries(messages) });
     }
@@ -1538,7 +1578,10 @@ function html() {
       if (draft !== undefined && (messages.get(data.repositoryId) ?? input?.value ?? '') !== draft) return;
       messages.set(data.repositoryId, data.message);
       persistDrafts();
-      if (input) input.value = data.message;
+      if (input) {
+        input.value = data.message;
+        updateBusy(data.repositoryId);
+      }
     }
 
     function updateBusy(id) {
@@ -1614,6 +1657,8 @@ function html() {
       if (data.incomplete && details && !warning) {
         details.prepend(el('div', 'graph-meta stats-warning', 'Some line counts are unavailable.'));
       } else if (!data.incomplete) warning?.remove();
+      const rendered = repositoryRenders.get(repository.id);
+      if (rendered?.repository === repository) rendered.signature = repositorySignature(repository);
     }
 
     function setFileStats(node, count, ready, badge) {
@@ -1752,22 +1797,54 @@ function html() {
         ? [active.selectionStart, active.selectionEnd, active.selectionDirection] : undefined;
       const scrollTop = root.scrollTop;
       hideTooltip();
-      root.replaceChildren();
       if (model.loading) {
+        root.replaceChildren();
+        repositoryRenders.clear();
         if (model.repositories.length) {
           model.repositories.forEach((repository) => root.append(el('div', 'repo-row', repository.name)));
         } else root.append(el('div', 'empty', 'Loading repositories…'));
         return;
       }
       if (model.error) {
+        root.replaceChildren();
+        repositoryRenders.clear();
         root.append(el('div', 'empty', model.error));
         return;
       }
       if (!model.repositories.length) {
+        root.replaceChildren();
+        repositoryRenders.clear();
         root.append(el('div', 'empty', 'No repositories found'));
         return;
       }
-      model.repositories.forEach((repository) => root.append(renderRepository(repository)));
+      const ids = new Set(model.repositories.map((repository) => repository.id));
+      for (const [id, rendered] of repositoryRenders) {
+        if (ids.has(id)) continue;
+        rendered.section.remove();
+        repositoryRenders.delete(id);
+      }
+      if (!repositoryRenders.size) root.replaceChildren();
+      model.repositories = model.repositories.map((repository, index) => {
+        const signature = repositorySignature(repository);
+        let rendered = repositoryRenders.get(repository.id);
+        if (!rendered || rendered.signature !== signature) {
+          const section = renderRepository(repository);
+          rendered?.section.replaceWith(section);
+          rendered = { section, signature, repository };
+          repositoryRenders.set(repository.id, rendered);
+        } else {
+          // Keep event handlers and asynchronous stats on the same repository object.
+          Object.assign(rendered.repository, repository);
+          repository = rendered.repository;
+        }
+        if (root.children[index] !== rendered.section) {
+          root.insertBefore(rendered.section, root.children[index] || null);
+        }
+        setRepositoryExpanded(repository, model.expanded.includes(repository.id));
+        updateBusy(repository.id);
+        updateGenerating(repository.id);
+        return repository;
+      });
       root.scrollTop = scrollTop;
       if (focusedRepo) {
         const input = repositorySection(focusedRepo)?.querySelector('textarea');
@@ -1827,13 +1904,20 @@ function html() {
         row.tabIndex = 0;
         row.setAttribute('role', 'button');
         row.setAttribute('aria-expanded', String(expanded));
-        row.addEventListener('click', () => {
+        const toggle = () => {
           if (Date.now() < suppressToggleUntil) return;
-          post('toggle', repository);
-        });
+          const expanded = !model.expanded.includes(repository.id);
+          expansionOverrides.set(repository.id, expanded);
+          setRepositoryExpanded(repository, expanded);
+          vscode.postMessage({ type: 'toggle', repositoryId: repository.id, expanded });
+        };
+        row.addEventListener('click', toggle);
         row.addEventListener('keydown', (event) => {
           if (event.target !== row) return;
-          if (event.key === 'Enter' || event.key === ' ') post('toggle', repository);
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            toggle();
+          }
         });
       }
       row.append(
@@ -1992,7 +2076,11 @@ function html() {
       );
       row.append(meta, actions);
       section.append(row);
-      if (expanded && repository.expandable) section.append(renderDetails(repository));
+      if (repository.expandable) {
+        const details = renderDetails(repository);
+        details.hidden = !expanded;
+        section.append(details);
+      }
       section.inert = Boolean(progressLabel);
       section.setAttribute('aria-busy', String(Boolean(progressLabel)));
       return section;
@@ -2137,13 +2225,19 @@ function html() {
       const heading = el('div', 'group-title');
       const nodes = repository[kind];
       const key = repository.id + ':' + kind;
-      const collapsed = collapsedGroups.has(key);
+      let collapsed = collapsedGroups.has(key);
       heading.tabIndex = 0;
       heading.setAttribute('role', 'button');
       heading.setAttribute('aria-expanded', String(!collapsed));
       const toggle = () => {
-        collapsed ? collapsedGroups.delete(key) : collapsedGroups.add(key);
-        render();
+        collapsed = !collapsed;
+        collapsed ? collapsedGroups.add(key) : collapsedGroups.delete(key);
+        heading.setAttribute('aria-expanded', String(!collapsed));
+        const arrow = heading.querySelector('.group-chevron');
+        arrow?.classList.toggle('open', !collapsed);
+        arrow?.setAttribute('aria-label', (collapsed ? 'Expand ' : 'Collapse ') + title);
+        contents.hidden = collapsed;
+        hideTooltip();
       };
       heading.addEventListener('click', (event) => {
         if (!event.target.closest('button')) toggle();
@@ -2175,11 +2269,10 @@ function html() {
         el('span', 'count', String(countFiles(nodes))),
       );
       group.append(heading);
-      if (!collapsed) {
-        const contents = model.viewMode === 'tree' ? el('div', 'tree') : group;
-        nodes.forEach((node) => contents.append(renderNode(repository, kind, node)));
-        if (contents !== group) group.append(contents);
-      }
+      const contents = el('div', model.viewMode === 'tree' ? 'tree' : 'group-content');
+      nodes.forEach((node) => contents.append(renderNode(repository, kind, node)));
+      contents.hidden = collapsed;
+      group.append(contents);
       return group;
     }
 

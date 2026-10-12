@@ -1578,7 +1578,10 @@ function html() {
       if (draft !== undefined && (messages.get(data.repositoryId) ?? input?.value ?? '') !== draft) return;
       messages.set(data.repositoryId, data.message);
       persistDrafts();
-      if (input) input.value = data.message;
+      if (input) {
+        input.value = data.message;
+        updateBusy(data.repositoryId);
+      }
     }
 
     function updateBusy(id) {

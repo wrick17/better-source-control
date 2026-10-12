@@ -199,6 +199,32 @@ test('refreshes preserve local disclosures while still allowing automatic expans
   assert.deepEqual([...context.model.expanded], [], 'Toolbar choices must also survive refreshes');
 });
 
+test('generated messages enable Commit in retained collapsed repository details', () => {
+  const markup = html();
+  const input = { value: '' };
+  const commit = { disabled: true };
+  const details = { hidden: true };
+  const section = {
+    setAttribute() {},
+    querySelector: (selector) => ({
+      textarea: input, '[data-action="commit"]': commit, '.details': details,
+    })[selector],
+  };
+  const context = vm.createContext({
+    composing: false, pendingGenerated: new Map(),
+    generatingDrafts: new Map([['/repo', '']]), messages: new Map(), busy: new Map(),
+    model: { repositories: [{ id: '/repo' }] }, document: { activeElement: undefined },
+    repositorySection: () => section, persistDrafts() {},
+  });
+  vm.runInContext(markup.slice(markup.indexOf('    function applyGeneratedMessage('),
+    markup.indexOf('    function updateGenerating(')), context);
+  context.applyGeneratedMessage({ repositoryId: '/repo', message: 'Generated commit' });
+  assert.equal(input.value, 'Generated commit');
+  assert.equal(details.hidden, true, 'Generation must preserve the collapsed view');
+  details.hidden = false;
+  assert.equal(commit.disabled, false, 'Reopening must show an enabled Commit without typing or refreshing');
+});
+
 test('tree rows use one compact indent per level and aligned file/folder columns', () => {
   const markup = html();
   const script = markup.slice(markup.indexOf('    function renderGroup('), markup.indexOf('    function renderGraph('));

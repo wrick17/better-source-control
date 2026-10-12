@@ -3,6 +3,7 @@
 A dedicated VS Code view for every Git repository in a workspace. It includes:
 
 - Repository-level Pull, Push, Publish Branch, and stash actions
+- Header actions to fetch or pull all repositories in the workspace
 - Staged and working-tree groups with per-file stage/unstage actions
 - Modified, added, deleted, renamed, and copied badges
 - Per-file and per-repository added/deleted line counts

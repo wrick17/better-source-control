@@ -2,7 +2,7 @@
   "name": "git-change-stats",
   "displayName": "Better Source Control",
   "description": "A clean multi-repository Git view with file stats, staging, branches, commits, stash, pull, and push.",
-  "version": "1.1.10",
+  "version": "1.1.11",
   "publisher": "wrick17",
   "repository": {
     "type": "git",
@@ -105,6 +105,11 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "gitChangeStats.pullAll",
+        "title": "Better Source Control: Pull All Repositories",
+        "icon": "$(arrow-down)"
+      },
+      {
         "command": "gitChangeStats.listView",
         "title": "Better Source Control: View as List",
         "icon": "$(list-flat)"
@@ -188,6 +193,11 @@
           "command": "gitChangeStats.fetchAll",
           "when": "view == gitChangeStats.repositories && gitChangeStats.available",
           "group": "navigation@5"
+        },
+        {
+          "command": "gitChangeStats.pullAll",
+          "when": "view == gitChangeStats.repositories && gitChangeStats.available",
+          "group": "navigation@5.5"
         },
         {
           "command": "gitChangeStats.configureAI",

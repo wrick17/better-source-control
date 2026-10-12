@@ -2848,6 +2848,16 @@ async function activate(context) {
       })));
       log.info(`Finished fetching all ${repositories.length} repositories.`);
     }),
+    vscode.commands.registerCommand('gitChangeStats.pullAll', async () => {
+      const repositories = [...api.repositories];
+      log.info(`Pulling all ${repositories.length} repositories.`);
+      await Promise.all(repositories.map((repository) => provider.receiveMessage({
+        type: 'operation',
+        operation: 'pullMerge',
+        repositoryId: repository.rootUri.fsPath,
+      })));
+      log.info(`Finished pulling all ${repositories.length} repositories.`);
+    }),
     vscode.commands.registerCommand('gitChangeStats.listView', () => provider.setViewMode('list')),
     vscode.commands.registerCommand('gitChangeStats.treeView', () => provider.setViewMode('tree')),
     vscode.commands.registerCommand('gitChangeStats.expandAll', () => provider.expandAll()),

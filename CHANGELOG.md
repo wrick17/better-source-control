@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.11 — 2026-10-12
+
+### Added
+
+- Add Pull All Repositories beside Fetch All Repositories in the view header, using each repository's existing pull action and skipping repositories with an operation running.
+
 ## 1.1.10 — 2026-10-06
 
 ### Fixed

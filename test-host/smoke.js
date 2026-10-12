@@ -52,6 +52,22 @@ async function run() {
     RepositoryViewProvider.prototype.resolveWebviewView = resolveView;
   }
   assert.ok(liveProvider, 'Native Better Source Control webview did not resolve');
+  const pullMerge = git.pullMerge;
+  const pulled = [];
+  try {
+    git.pullMerge = async (item) => { pulled.push(item.rootUri.fsPath); };
+    await vscode.commands.executeCommand('gitChangeStats.pullAll');
+    assert.deepEqual(pulled.sort(), api.repositories.map(item => item.rootUri.fsPath).sort(),
+      'Pull All must use the existing pull action for every open repository');
+    assert.equal(liveProvider.busyRepositories.size, 0);
+    pulled.length = 0;
+    liveProvider.busyRepositories.add(root);
+    await vscode.commands.executeCommand('gitChangeStats.pullAll');
+    assert.ok(!pulled.includes(root), 'Pull All must skip a repository with an operation running');
+  } finally {
+    liveProvider.busyRepositories.delete(root);
+    git.pullMerge = pullMerge;
+  }
   await liveProvider.refresh();
   assert.equal(liveProvider.view.badge.value, 1, 'Native webview badge must show changed files');
   await openDiff(api, repository, 'unstaged', change);

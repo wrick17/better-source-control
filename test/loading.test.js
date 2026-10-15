@@ -847,6 +847,7 @@ test('shows repositories as their data arrives and keeps unfinished ones steady'
 test('a No Verify choice applies to one hook-skipping operation, then operations verify again', async () => {
   const pushOptions = [];
   const amendOptions = [];
+  let amendResult = true;
   const saved = [];
   const posts = [];
   const repository = {
@@ -870,7 +871,7 @@ test('a No Verify choice applies to one hook-skipping operation, then operations
   });
   const { amendMessage, push } = git;
   git.push = async (_repository, options) => { pushOptions.push(options.noVerify); return true; };
-  git.amendMessage = async (_repository, _message, options) => { amendOptions.push(options.noVerify); return true; };
+  git.amendMessage = async (_repository, _message, options) => { amendOptions.push(options.noVerify); return amendResult; };
   showNoVerifyButton = true;
   inputBoxValue = 'Reworded';
   try {
@@ -888,6 +889,11 @@ test('a No Verify choice applies to one hook-skipping operation, then operations
     assert.deepEqual(amendOptions, [true]);
     assert.equal(provider.noVerify.has('/repo'), false, 'Amend must clear the flag too');
     assert.equal(posts.at(-1).repositories[0].noVerify, false);
+
+    amendResult = false;
+    provider.noVerify.add('/repo');
+    await provider.amendGraphCommitMessage(repository, commit);
+    assert.equal(provider.noVerify.has('/repo'), false, 'A failed amend with nothing pending must spend No Verify');
   } finally {
     git.amendMessage = amendMessage;
     git.push = push;

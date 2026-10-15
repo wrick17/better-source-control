@@ -463,7 +463,7 @@ test('publishes a local branch to the selected remote and verifies upstream', as
   ]);
   assert.equal(await publish({ ...repository, state: {
     ...repository.state, HEAD: { ...repository.state.HEAD, upstream: { remote: 'origin', name: 'feature' } },
-  } }), false);
+  } }), undefined);
 });
 
 test('no-verify publish checks live HEAD and uses the selected remote', async () => {
@@ -613,6 +613,24 @@ test('No Verify skips hooks for each continuation and preserves the native merge
     assert.deepEqual(calls, [['Merge branch', { noVerify: true }]]);
   } finally {
     gitRefStates.clear();
+  }
+});
+
+test('publish returns undefined when the remote picker is cancelled, so No Verify is not spent', async () => {
+  gitExecCalls.length = 0;
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: {
+      HEAD: { name: 'feature', commit: firstCommit },
+      remotes: [{ name: 'origin', pushUrl: 'a' }, { name: 'backup', pushUrl: 'b' }],
+    },
+  };
+  showQuickPickImpl = async () => undefined;
+  try {
+    assert.equal(await publish(repository, { noVerify: true, gitPath: '/git' }), undefined);
+    assert.deepEqual(gitExecCalls, []);
+  } finally {
+    showQuickPickImpl = async (items) => items[0];
   }
 });
 

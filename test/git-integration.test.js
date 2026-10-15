@@ -174,10 +174,13 @@ test('No Verify cherry-pick and revert continuations skip only pre-commit and co
   const { dir, repo } = setup(t);
   const log = path.join(dir, 'hooks.log');
   const hooks = path.join(dir, 'hooks');
-  fs.mkdirSync(hooks);
-  for (const name of ['pre-commit', 'commit-msg', 'post-commit']) {
-    fs.writeFileSync(path.join(hooks, name), `#!/bin/sh\necho ${name} >> "${log}"\n`, { mode: 0o755 });
-  }
+  fs.mkdirSync(path.join(hooks, 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(hooks, 'lib', 'record.sh'), `echo lib >> "${log}"\n`);
+  fs.writeFileSync(path.join(hooks, 'pre-commit'), `#!/bin/sh\necho pre-commit >> "${log}"\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(hooks, 'commit-msg'), `#!/bin/sh\necho commit-msg >> "${log}"\n`, { mode: 0o755 });
+  // Sources a file relative to its own location, so the kept hook must still run from its original path.
+  fs.writeFileSync(path.join(hooks, 'post-commit'),
+    `#!/bin/sh\necho post-commit >> "${log}"\n. "$(dirname "$0")/lib/record.sh"\n`, { mode: 0o755 });
   git(repo, 'config', 'core.hooksPath', hooks);
   const hooksRun = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
 
@@ -193,7 +196,7 @@ test('No Verify cherry-pick and revert continuations skip only pre-commit and co
   git(repo, 'add', 'file.txt');
   fs.rmSync(log, { force: true });
   assert.equal(await continueOperation(repository(repo), 'cherry-pick', '', { gitPath: 'git', noVerify: true }), true);
-  assert.deepEqual(hooksRun(), ['post-commit']);
+  assert.deepEqual(hooksRun(), ['post-commit', 'lib']);
   assert.equal(git(repo, 'status', '--porcelain'), '');
 
   fs.writeFileSync(path.join(repo, 'file.txt'), 'first\n');
@@ -205,7 +208,7 @@ test('No Verify cherry-pick and revert continuations skip only pre-commit and co
   git(repo, 'add', 'file.txt');
   fs.rmSync(log, { force: true });
   assert.equal(await continueOperation(repository(repo), 'revert', '', { gitPath: 'git', noVerify: true }), true);
-  assert.deepEqual(hooksRun(), ['post-commit']);
+  assert.deepEqual(hooksRun(), ['post-commit', 'lib']);
   assert.equal(await operationState(repository(repo), { gitPath: 'git' }), undefined);
 });
 

@@ -930,11 +930,12 @@ test('a continuation Git rejects keeps No Verify for the next one', async () => 
     context: { workspaceState: { update: async () => {} } },
     noVerify: new Set(['/repo']),
   });
-  const { continueOperation } = git;
+  const { continueOperation, operationState } = git;
   git.continueOperation = async (_repository, operation, _message, options) => {
     continued.push([operation, options.noVerify]);
     return accept;
   };
+  git.operationState = async () => 'merge';
   showNoVerifyButton = true;
   try {
     await provider.handleMessage({ type: 'continueOperation', operation: 'merge', repositoryId: '/repo' });
@@ -945,6 +946,69 @@ test('a continuation Git rejects keeps No Verify for the next one', async () => 
     assert.equal(provider.noVerify.has('/repo'), false);
   } finally {
     git.continueOperation = continueOperation;
+    git.operationState = operationState;
+    showNoVerifyButton = false;
+  }
+});
+
+test('No Verify survives a cancel and a failure with an operation pending, and is spent otherwise', async () => {
+  let pending;
+  let pullFromOutcome;
+  let pullMergeOutcome = false;
+  let abortOutcome = false;
+  const saved = [];
+  const posts = [];
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: {
+      HEAD: { name: 'main', commit: 'abc' },
+      indexChanges: [], mergeChanges: [], untrackedChanges: [], workingTreeChanges: [],
+    },
+  };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [repository], git: {} },
+    context: { workspaceState: { update: async (...args) => saved.push(args) } },
+    noVerify: new Set(['/repo']),
+    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    snapshots: new Map(), stats: new Map(), viewMode: 'list',
+    graph: { repositoryId: '/repo', head: 'abc', commits: [], limit: 50 },
+    view: { webview: { postMessage: async (message) => posts.push(message) } },
+    loadGraph: async () => {},
+    scheduleStats() {},
+  });
+  const armed = () => provider.noVerify.has('/repo');
+  const { abortOperation, operationState, pullFrom, pullMerge } = git;
+  git.operationState = async () => pending;
+  git.pullFrom = async () => pullFromOutcome;
+  git.pullMerge = async () => pullMergeOutcome;
+  git.abortOperation = async () => abortOutcome;
+  showNoVerifyButton = true;
+  try {
+    await provider.handleMessage({ type: 'operation', operation: 'pullFrom', repositoryId: '/repo' });
+    assert.equal(armed(), true, 'A cancelled pull must keep No Verify');
+
+    await provider.handleMessage({ type: 'operation', operation: 'pullMerge', repositoryId: '/repo' });
+    assert.equal(armed(), false, 'A failure with no operation pending must spend No Verify');
+
+    provider.noVerify.add('/repo');
+    pending = 'merge';
+    await provider.handleMessage({ type: 'operation', operation: 'pullMerge', repositoryId: '/repo' });
+    assert.equal(armed(), true, 'A conflicted pull must keep No Verify for its continuation');
+
+    abortOutcome = false;
+    await provider.handleMessage({ type: 'abortOperation', operation: 'merge', repositoryId: '/repo' });
+    assert.equal(armed(), true, 'A cancelled abort must keep No Verify');
+
+    pending = undefined;
+    abortOutcome = true;
+    provider.noVerify.add('/repo');
+    await provider.handleMessage({ type: 'abortOperation', operation: 'merge', repositoryId: '/repo' });
+    assert.equal(armed(), false, 'A successful abort must spend No Verify');
+  } finally {
+    git.operationState = operationState;
+    git.pullFrom = pullFrom;
+    git.pullMerge = pullMerge;
+    git.abortOperation = abortOperation;
     showNoVerifyButton = false;
   }
 });

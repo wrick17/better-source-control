@@ -109,6 +109,7 @@ async function pullFrom(repository, { noVerify = false, gitPath } = {}) {
       runVsCodeCommand(repository, 'git.pullFrom', repository.rootUri));
   }
   let succeeded = false;
+  let cancelled = false;
   await run(repository, 'Pulling from branch', async () => {
     const remotes = repository.state.remotes.filter((remote) => remote.fetchUrl);
     if (!remotes.length) throw new Error('No remotes are configured.');
@@ -116,19 +117,25 @@ async function pullFrom(repository, { noVerify = false, gitPath } = {}) {
       remotes.map((item) => ({ label: item.name, description: item.fetchUrl, remote: item })),
       { title: 'Pull from', placeHolder: 'Select a remote' },
     ).then((item) => item?.remote);
-    if (!remote) return;
+    if (!remote) {
+      cancelled = true;
+      return;
+    }
     const refs = await callApi(repository, 'getRefs', { pattern: `refs/remotes/${remote.name}/` });
     const picked = await vscode.window.showQuickPick(
       refs.filter((ref) => ref.name).map((ref) => ({ label: ref.name, ref })),
       { title: `Pull from ${remote.name}`, placeHolder: 'Select a branch' },
     );
-    if (!picked) return;
+    if (!picked) {
+      cancelled = true;
+      return;
+    }
     const branch = picked.ref.name.slice(remote.name.length + 1);
     await callApi(repository, 'fetch', remote.name, branch);
     await runGit(repository, gitPath, ['merge', '--no-edit', '--no-verify', 'FETCH_HEAD']);
     succeeded = true;
   });
-  return succeeded;
+  return cancelled ? undefined : succeeded;
 }
 
 async function runGit(repository, gitPath, args, options = {}) {
@@ -175,17 +182,41 @@ async function continueOperation(repository, operation, message, options = {}) {
     return run(repository, 'Continuing merge', () =>
       callApi(repository, 'commit', value, { noVerify: options.noVerify ?? false }));
   }
-  // Continuations lack --no-verify, and VS Code's rebase commit path ignores noVerify.
+  // Continuations lack --no-verify. VS Code's rebase commit path ignores noVerify, so it is bypassed.
+  // Rebase continuation runs no pre-commit or commit-msg hook (observed on git 2.54), so it needs no extra flag.
   if (operation === 'rebase') return run(repository, 'Continuing rebase', () =>
     repository.state.rebaseCommit && !options.noVerify
       ? callApi(repository, 'commit', repository.state.rebaseCommit.message, {})
-      : runGit(repository, options.gitPath,
-        [...(options.noVerify ? ['-c', 'core.hooksPath=/dev/null'] : []), 'rebase', '--continue'],
+      : runGit(repository, options.gitPath, ['rebase', '--continue'],
         { env: { ...process.env, GIT_EDITOR: 'true' } }));
-  if (operation === 'cherry-pick' || operation === 'revert') return run(repository, `Continuing ${operation}`, () =>
-    runGit(repository, options.gitPath,
-      [...(options.noVerify ? ['-c', 'core.hooksPath=/dev/null'] : []), operation, '--continue']));
+  if (operation === 'cherry-pick' || operation === 'revert') return run(repository, `Continuing ${operation}`, async () => {
+    const hooks = options.noVerify
+      ? ['-c', `core.hooksPath=${await noVerifyHooksPath(repository, options.gitPath)}`]
+      : [];
+    await runGit(repository, options.gitPath, [...hooks, operation, '--continue']);
+  });
   return false;
+}
+
+// Git's own --no-verify skips only these two hooks, so every other active hook stays on.
+const VERIFY_HOOKS = ['commit-msg', 'pre-commit'];
+
+// Copies the active hooks minus the verify hooks into the git dir and returns that directory.
+function noVerifyHooksPath(repository, gitPath) {
+  return queueGit(repository, async () => {
+    const gitDir = await resolveGitDir(repository, gitPath, true);
+    const { stdout } = await execNow(repository, gitPath, ['rev-parse', '--git-path', 'hooks']);
+    const activeDir = path.resolve(repository.rootUri.fsPath, stdout.trim());
+    const hooksDir = path.join(gitDir, 'no-verify-hooks');
+    await fs.rm(hooksDir, { recursive: true, force: true });
+    await fs.mkdir(hooksDir);
+    for (const name of await fs.readdir(activeDir).catch(() => [])) {
+      const source = path.join(activeDir, name);
+      if (VERIFY_HOOKS.includes(name) || !(await fs.stat(source).catch(() => null))?.isFile()) continue;
+      await fs.copyFile(source, path.join(hooksDir, name));
+    }
+    return hooksDir;
+  });
 }
 
 async function abortOperation(repository, operation, options = {}) {

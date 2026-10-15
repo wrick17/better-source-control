@@ -44,7 +44,12 @@ Module._load = function load(request, parent, isMain) {
     return { execFile: fakeExecFile };
   }
   if (request === 'node:fs/promises') {
-    return { readFile: (...args) => readMarkerImpl(...args) };
+    return {
+      readFile: (...args) => readMarkerImpl(...args),
+      rm: async () => {},
+      mkdir: async () => {},
+      readdir: async () => [],
+    };
   }
   if (request === 'vscode') {
     return {
@@ -397,7 +402,7 @@ test('pull from preserves no-verify while using the selected remote branch', asy
   assert.deepEqual(gitExecCalls[0][1], ['merge', '--no-edit', '--no-verify', 'FETCH_HEAD']);
 });
 
-test('pull from returns false without fetching or merging when the branch picker is cancelled', async () => {
+test('pull from returns undefined without fetching or merging when the branch picker is cancelled', async () => {
   gitExecCalls.length = 0;
   const calls = [];
   const repository = {
@@ -409,7 +414,7 @@ test('pull from returns false without fetching or merging when the branch picker
   };
   showQuickPickImpl = async () => undefined;
   try {
-    assert.equal(await pullFrom(repository, { noVerify: true, gitPath: '/git' }), false);
+    assert.equal(await pullFrom(repository, { noVerify: true, gitPath: '/git' }), undefined);
     assert.deepEqual(calls, []);
     assert.deepEqual(gitExecCalls, []);
   } finally {
@@ -592,13 +597,15 @@ test('No Verify skips hooks for each continuation and preserves the native merge
       gitRefStates.add(marker);
       gitExecCalls.length = 0;
       assert.equal(await continueOperation(repository, operation, '', options), true);
-      assert.deepEqual(gitExecCalls.at(-1)[1], ['-c', 'core.hooksPath=/dev/null', operation, '--continue']);
+      assert.deepEqual(gitExecCalls.at(-1)[1], operation === 'rebase'
+        ? ['rebase', '--continue']
+        : ['-c', `core.hooksPath=${path.join('/repo', '.git', 'no-verify-hooks')}`, operation, '--continue']);
       gitRefStates.clear();
     }
     repository.state.rebaseCommit = { hash: firstCommit, message: 'fix: rebased' };
     assert.equal(await continueOperation(repository, 'rebase', '', options), true);
     assert.deepEqual(calls, []);
-    assert.deepEqual(gitExecCalls.at(-1)[1], ['-c', 'core.hooksPath=/dev/null', 'rebase', '--continue']);
+    assert.deepEqual(gitExecCalls.at(-1)[1], ['rebase', '--continue']);
     assert.equal(gitExecCalls.at(-1)[2].env.GIT_EDITOR, 'true');
     repository.state.rebaseCommit = undefined;
     gitRefStates.add('MERGE_HEAD');

@@ -728,7 +728,7 @@ test('keeps the last completed stats visible while refreshing them', () => {
   assert.equal(provider.dirtyStats.has('/repo'), true);
 });
 
-test('a superseded refresh neither overwrites a newer snapshot nor reads further repositories', async () => {
+test('a superseded refresh never overwrites a newer snapshot', async () => {
   const repository = (fsPath) => ({ rootUri: { fsPath }, state: {} });
   const calls = [];
   const posts = [];
@@ -755,7 +755,31 @@ test('a superseded refresh neither overwrites a newer snapshot nor reads further
 
   assert.equal(provider.snapshots.get('/a').name, 'new');
   assert.deepEqual(posts.at(-1).repositories.map(({ name }) => name), ['new', 'new']);
-  assert.deepEqual(calls, ['/a', '/a', '/b'], 'The superseded refresh must not read /b');
+});
+
+test('a slow repository does not delay the first render of the others', async () => {
+  const posts = [];
+  const repository = (fsPath) => ({ rootUri: { fsPath }, state: {} });
+  let finishSlow;
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [repository('/slow'), repository('/fast')] },
+    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    snapshots: new Map(), stats: new Map(), viewMode: 'list',
+    view: { webview: { postMessage: async (message) => posts.push(message) } },
+    repositoryData: ({ rootUri }) => rootUri.fsPath === '/slow'
+      ? new Promise((resolve) => { finishSlow = resolve; })
+      : { id: rootUri.fsPath },
+    scheduleStats() {},
+  });
+
+  const done = provider.refresh();
+  await new Promise(setImmediate);
+  const rendered = posts.filter((message) => !message.loading).at(-1)?.repositories.map(({ id }) => id);
+  assert.deepEqual(rendered, ['/fast'], 'The ready repository must paint while /slow is still reading');
+
+  finishSlow({ id: '/slow' });
+  await done;
+  assert.deepEqual(posts.at(-1).repositories.map(({ id }) => id), ['/fast', '/slow']);
 });
 
 test('a superseded refresh sends no final render after its held progressive render is released', async () => {

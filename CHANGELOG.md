@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.14 — 2026-10-15
+
+### Changed
+
+- No Verify now applies to one operation: the next commit, continue, abort, pull, push, publish, or amend. It clears after that operation succeeds, or after a failure that leaves no merge, rebase, cherry-pick, or revert pending. Cancelled operations keep it.
+
+### Fixed
+
+- No Verify on rebase, cherry-pick, and revert continuations no longer disables post-commit and other non-verify hooks. Cherry-pick and revert continuations skip only pre-commit and commit-msg, as `git commit --no-verify` does.
+
 ## 1.1.13 — 2026-10-15
 
 ### Added

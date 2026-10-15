@@ -282,7 +282,7 @@ class RepositoryViewProvider {
       }
       return;
     }
-    this.scheduleStats(openRepositories);
+    if (refreshId === this.refreshId) this.scheduleStats(openRepositories);
   }
 
   scheduleStats(repositories) {

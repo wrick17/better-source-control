@@ -763,7 +763,8 @@ test('a slow repository does not delay the first render of the others', async ()
   let finishSlow;
   const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
     api: { state: 'initialized', repositories: [repository('/slow'), repository('/fast')] },
-    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(),
+    repositoryOrder: ['/slow', '/fast'],
     snapshots: new Map(), stats: new Map(), viewMode: 'list',
     view: { webview: { postMessage: async (message) => posts.push(message) } },
     repositoryData: ({ rootUri }) => rootUri.fsPath === '/slow'
@@ -779,7 +780,7 @@ test('a slow repository does not delay the first render of the others', async ()
 
   finishSlow({ id: '/slow' });
   await done;
-  assert.deepEqual(posts.at(-1).repositories.map(({ id }) => id), ['/fast', '/slow']);
+  assert.deepEqual(posts.at(-1).repositories.map(({ id }) => id), ['/slow', '/fast']);
 });
 
 test('a superseded refresh sends no final render after its held progressive render is released', async () => {

@@ -599,7 +599,7 @@ test('No Verify skips hooks for each continuation and preserves the native merge
       assert.equal(await continueOperation(repository, operation, '', options), true);
       assert.deepEqual(gitExecCalls.at(-1)[1], operation === 'rebase'
         ? ['rebase', '--continue']
-        : ['-c', 'core.hooksPath=/repo/.git/no-verify-hooks', operation, '--continue']);
+        : ['-c', `core.hooksPath=${path.join('/repo', '.git', 'no-verify-hooks')}`, operation, '--continue']);
       gitRefStates.clear();
     }
     repository.state.rebaseCommit = { hash: firstCommit, message: 'fix: rebased' };

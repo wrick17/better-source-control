@@ -27,6 +27,14 @@ function callApi(repository, method, ...args) {
   return repository[method](...args);
 }
 
+async function refreshStatus(repository) {
+  try {
+    await callApi(repository, 'status');
+  } catch (error) {
+    log?.error(`[${path.basename(repository.rootUri.fsPath)}] Refreshing status failed.`, error);
+  }
+}
+
 function runVsCodeCommand(repository, command, ...args) {
   logInvocation(repository, `VS Code command ${command}`);
   return vscode.commands.executeCommand(command, ...args);
@@ -128,7 +136,7 @@ async function runGit(repository, gitPath, args, options = {}) {
   try {
     await execGitCommand(repository, gitPath, args, options);
   } finally {
-    await callApi(repository, 'status');
+    await refreshStatus(repository);
   }
 }
 
@@ -212,7 +220,7 @@ async function abortOperation(repository, operation, options = {}) {
         else await execNow(repository, gitPath, [operation, '--abort']);
       });
     } finally {
-      await callApi(repository, 'status');
+      await refreshStatus(repository);
     }
   });
 }
@@ -296,7 +304,7 @@ async function publish(repository, { noVerify = false, gitPath } = {}) {
             ['push', '--no-verify', '--set-upstream', remote.name, `HEAD:refs/heads/${head.name}`]);
         });
       } finally {
-        await callApi(repository, 'status');
+        await refreshStatus(repository);
       }
     } else {
       await callApi(repository, 'push', remote.name, head.name, true);
@@ -353,7 +361,7 @@ async function resetToOrigin(repository, { gitPath } = {}) {
         await execNow(repository, gitPath, ['reset', '--hard', fetched]);
       });
     } finally {
-      await callApi(repository, 'status');
+      await refreshStatus(repository);
     }
   });
 }
@@ -423,7 +431,7 @@ async function runGuardedGit(repository, gitPath, args, expectedHead) {
       await execNow(repository, gitPath, args);
     });
   } finally {
-    await callApi(repository, 'status');
+    await refreshStatus(repository);
   }
 }
 
@@ -449,7 +457,7 @@ function rollback(repository, ref, mode, { gitPath, expectedHead } = {}) {
         await execNow(repository, gitPath, ['reset', `--${mode}`, ref]);
       });
     } finally {
-      await callApi(repository, 'status');
+      await refreshStatus(repository);
     }
   });
 }
@@ -498,7 +506,7 @@ function revertCommit(repository, ref, { gitPath, expectedHead } = {}) {
         await execNow(repository, gitPath, ['revert', '--no-edit', ref]);
       });
     } finally {
-      await callApi(repository, 'status');
+      await refreshStatus(repository);
     }
   });
 }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.15 — 2026-10-15
+
+### Fixed
+
+- A cancelled Publish Branch picker or a publish that never reaches Git keeps No Verify armed.
+- A failed graph amend spends No Verify when no merge, rebase, cherry-pick, or revert is pending, matching other operations.
+- Retained hooks keep their original layout, so hooks that use paths relative to `$0` still work during No Verify continuations.
+- Non-executable hooks stay disabled during No Verify continuations, as Git itself does.
+
 ## 1.1.14 — 2026-10-15
 
 ### Changed

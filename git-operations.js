@@ -8,7 +8,9 @@ const vscode = require('vscode');
 
 const execGit = promisify(execFile);
 const EXEC_TIMEOUT_MS = 300_000;
-let execQueue = Promise.resolve();
+const GIT_DIR_CACHE_MS = 5_000;
+const execQueues = new Map();
+const gitDirs = new Map();
 let log;
 
 function setLog(value) {
@@ -25,14 +27,23 @@ function callApi(repository, method, ...args) {
   return repository[method](...args);
 }
 
+async function refreshStatus(repository) {
+  try {
+    await callApi(repository, 'status');
+  } catch (error) {
+    log?.error(`[${path.basename(repository.rootUri.fsPath)}] Refreshing status failed.`, error);
+  }
+}
+
 function runVsCodeCommand(repository, command, ...args) {
   logInvocation(repository, `VS Code command ${command}`);
   return vscode.commands.executeCommand(command, ...args);
 }
 
-function queueGit(action) {
-  const result = execQueue.then(action);
-  execQueue = result.catch(() => {});
+function queueGit(repository, action) {
+  const root = repository.rootUri.fsPath;
+  const result = (execQueues.get(root) ?? Promise.resolve()).then(action);
+  execQueues.set(root, result.catch(() => {}));
   return result;
 }
 
@@ -42,6 +53,7 @@ function execNow(repository, gitPath, args, options = {}) {
   logInvocation(repository, invocation);
   return execGit(gitPath, args, {
     cwd: repository.rootUri.fsPath,
+    maxBuffer: 16 * 1024 * 1024,
     ...options,
     timeout: Math.min(options.timeout > 0 ? options.timeout : EXEC_TIMEOUT_MS, EXEC_TIMEOUT_MS),
     killSignal: 'SIGKILL',
@@ -49,8 +61,21 @@ function execNow(repository, gitPath, args, options = {}) {
 }
 
 function execGitCommand(repository, gitPath, args, options = {}) {
-  // ponytail: one process at a time; add a small pool only if large workspaces prove this too slow.
-  return queueGit(() => execNow(repository, gitPath, args, options));
+  return queueGit(repository, () => execNow(repository, gitPath, args, options));
+}
+
+function resolveGitDir(repository, gitPath, fresh = false) {
+  const key = JSON.stringify([repository.rootUri.fsPath, gitPath]);
+  if (fresh || !gitDirs.has(key) || gitDirs.get(key).expires <= Date.now()) {
+    const result = execNow(repository, gitPath, ['rev-parse', '--absolute-git-dir'])
+      .then(({ stdout }) => stdout.trim())
+      .catch((error) => {
+        gitDirs.delete(key);
+        throw error;
+      });
+    gitDirs.set(key, { result, expires: Date.now() + GIT_DIR_CACHE_MS });
+  }
+  return gitDirs.get(key).result;
 }
 
 async function run(repository, title, action) {
@@ -78,12 +103,13 @@ function fetch(repository) {
   return run(repository, 'Fetching changes', () => callApi(repository, 'fetch'));
 }
 
-function pullFrom(repository, { noVerify = false, gitPath } = {}) {
+async function pullFrom(repository, { noVerify = false, gitPath } = {}) {
   if (!noVerify) {
     return run(repository, 'Pulling from branch', () =>
       runVsCodeCommand(repository, 'git.pullFrom', repository.rootUri));
   }
-  return run(repository, 'Pulling from branch', async () => {
+  let succeeded = false;
+  await run(repository, 'Pulling from branch', async () => {
     const remotes = repository.state.remotes.filter((remote) => remote.fetchUrl);
     if (!remotes.length) throw new Error('No remotes are configured.');
     const remote = remotes.length === 1 ? remotes[0] : await vscode.window.showQuickPick(
@@ -100,7 +126,9 @@ function pullFrom(repository, { noVerify = false, gitPath } = {}) {
     const branch = picked.ref.name.slice(remote.name.length + 1);
     await callApi(repository, 'fetch', remote.name, branch);
     await runGit(repository, gitPath, ['merge', '--no-edit', '--no-verify', 'FETCH_HEAD']);
+    succeeded = true;
   });
+  return succeeded;
 }
 
 async function runGit(repository, gitPath, args, options = {}) {
@@ -108,14 +136,14 @@ async function runGit(repository, gitPath, args, options = {}) {
   try {
     await execGitCommand(repository, gitPath, args, options);
   } finally {
-    await callApi(repository, 'status');
+    await refreshStatus(repository);
   }
 }
 
-async function operationState(repository, { gitPath } = {}) {
+async function operationState(repository, { gitPath, fresh = false } = {}) {
   if (repository.state.rebaseCommit) return 'rebase';
   if (!gitPath) return;
-  const gitDir = (await execGitCommand(repository, gitPath, ['rev-parse', '--absolute-git-dir'])).stdout.trim();
+  const gitDir = await queueGit(repository, () => resolveGitDir(repository, gitPath, fresh));
   for (const [marker, operation] of [
     ['REBASE_HEAD', 'rebase'],
     ['CHERRY_PICK_HEAD', 'cherry-pick'],
@@ -136,7 +164,7 @@ async function readOperationMarker(gitDir, marker) {
 }
 
 async function continueOperation(repository, operation, message, options = {}) {
-  if (await operationState(repository, options) !== operation) return false;
+  if (await operationState(repository, { ...options, fresh: true }) !== operation) return false;
   if (operation === 'merge') {
     if (repository.state.mergeChanges.length) {
       await vscode.window.showWarningMessage('Resolve all merge conflicts before continuing.');
@@ -147,21 +175,25 @@ async function continueOperation(repository, operation, message, options = {}) {
     return run(repository, 'Continuing merge', () =>
       callApi(repository, 'commit', value, { noVerify: options.noVerify ?? false }));
   }
+  // Continuations lack --no-verify, and VS Code's rebase commit path ignores noVerify.
   if (operation === 'rebase') return run(repository, 'Continuing rebase', () =>
-    repository.state.rebaseCommit
+    repository.state.rebaseCommit && !options.noVerify
       ? callApi(repository, 'commit', repository.state.rebaseCommit.message, {})
-      : runGit(repository, options.gitPath, ['rebase', '--continue']));
+      : runGit(repository, options.gitPath,
+        [...(options.noVerify ? ['-c', 'core.hooksPath=/dev/null'] : []), 'rebase', '--continue'],
+        { env: { ...process.env, GIT_EDITOR: 'true' } }));
   if (operation === 'cherry-pick' || operation === 'revert') return run(repository, `Continuing ${operation}`, () =>
-    runGit(repository, options.gitPath, [operation, '--continue']));
+    runGit(repository, options.gitPath,
+      [...(options.noVerify ? ['-c', 'core.hooksPath=/dev/null'] : []), operation, '--continue']));
   return false;
 }
 
 async function abortOperation(repository, operation, options = {}) {
-  if (await operationState(repository, options) !== operation) return false;
+  if (await operationState(repository, { ...options, fresh: true }) !== operation) return false;
   const { gitPath } = options;
   let expected;
   try {
-    expected = await queueGit(() => readOperationIdentity(repository, gitPath, operation));
+    expected = await queueGit(repository, () => readOperationIdentity(repository, gitPath, operation));
   } catch (error) {
     log?.error(`[${path.basename(repository.rootUri.fsPath)}] Checking ${operation} failed.`, error);
     void vscode.window.showErrorMessage(
@@ -178,7 +210,7 @@ async function abortOperation(repository, operation, options = {}) {
   if (picked !== action) return false;
   return run(repository, `Aborting ${operation}`, async () => {
     try {
-      await queueGit(async () => {
+      await queueGit(repository, async () => {
         const actual = await readOperationIdentity(repository, gitPath, operation);
         if (actual.branch !== expected.branch || actual.head !== expected.head
           || actual.marker !== expected.marker || actual.rebaseCommit !== expected.rebaseCommit) {
@@ -188,14 +220,14 @@ async function abortOperation(repository, operation, options = {}) {
         else await execNow(repository, gitPath, [operation, '--abort']);
       });
     } finally {
-      await callApi(repository, 'status');
+      await refreshStatus(repository);
     }
   });
 }
 
 async function readOperationIdentity(repository, gitPath, operation) {
   if (!gitPath) throw new Error('Git executable unavailable.');
-  const gitDir = (await execNow(repository, gitPath, ['rev-parse', '--absolute-git-dir'])).stdout.trim();
+  const gitDir = await resolveGitDir(repository, gitPath, true);
   const markerName = {
     merge: 'MERGE_HEAD', rebase: 'REBASE_HEAD',
     'cherry-pick': 'CHERRY_PICK_HEAD', revert: 'REVERT_HEAD',
@@ -265,14 +297,14 @@ async function publish(repository, { noVerify = false, gitPath } = {}) {
     if (noVerify) {
       if (!gitPath) throw new Error('Git executable unavailable.');
       try {
-        await queueGit(async () => {
+        await queueGit(repository, async () => {
           await assertExpectedHead(repository, gitPath, head);
           await assertNoOperation(repository, gitPath);
           await execNow(repository, gitPath,
             ['push', '--no-verify', '--set-upstream', remote.name, `HEAD:refs/heads/${head.name}`]);
         });
       } finally {
-        await callApi(repository, 'status');
+        await refreshStatus(repository);
       }
     } else {
       await callApi(repository, 'push', remote.name, head.name, true);
@@ -317,7 +349,7 @@ async function resetToOrigin(repository, { gitPath } = {}) {
   return run(repository, `Resetting ${branch} to origin`, async () => {
     if (!gitPath) throw new Error('Git executable unavailable.');
     try {
-      await queueGit(async () => {
+      await queueGit(repository, async () => {
         await assertExpectedHead(repository, gitPath, { name: branch, commit });
         await assertNoOperation(repository, gitPath);
         await execNow(repository, gitPath, ['fetch', 'origin', `refs/heads/${branch}`]);
@@ -329,7 +361,7 @@ async function resetToOrigin(repository, { gitPath } = {}) {
         await execNow(repository, gitPath, ['reset', '--hard', fetched]);
       });
     } finally {
-      await callApi(repository, 'status');
+      await refreshStatus(repository);
     }
   });
 }
@@ -352,7 +384,7 @@ async function assertNoOperation(repository, gitPath) {
   if (repository.state.rebaseCommit || repository.state.mergeChanges.length) {
     throw new Error('Finish the current Git operation or resolve conflicts first.');
   }
-  const gitDir = (await execNow(repository, gitPath, ['rev-parse', '--absolute-git-dir'])).stdout.trim();
+  const gitDir = await resolveGitDir(repository, gitPath, true);
   for (const marker of ['REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'MERGE_HEAD']) {
     if (await readOperationMarker(gitDir, marker)) {
       throw new Error('Finish the current Git operation first.');
@@ -393,13 +425,13 @@ function amendMessage(repository, message, { noVerify = false, gitPath, expected
 async function runGuardedGit(repository, gitPath, args, expectedHead) {
   if (!gitPath) throw new Error('Git executable unavailable.');
   try {
-    await queueGit(async () => {
+    await queueGit(repository, async () => {
       await assertExpectedHead(repository, gitPath, expectedHead);
       await assertNoOperation(repository, gitPath);
       await execNow(repository, gitPath, args);
     });
   } finally {
-    await callApi(repository, 'status');
+    await refreshStatus(repository);
   }
 }
 
@@ -417,7 +449,7 @@ function rollback(repository, ref, mode, { gitPath, expectedHead } = {}) {
   return run(repository, 'Rolling back branch', async () => {
     if (!gitPath) throw new Error('Git executable unavailable.');
     try {
-      await queueGit(async () => {
+      await queueGit(repository, async () => {
         await assertExpectedHead(repository, gitPath, expectedHead);
         await assertNoOperation(repository, gitPath);
         const ancestor = (await execNow(repository, gitPath, ['merge-base', 'HEAD', ref])).stdout.trim();
@@ -425,7 +457,7 @@ function rollback(repository, ref, mode, { gitPath, expectedHead } = {}) {
         await execNow(repository, gitPath, ['reset', `--${mode}`, ref]);
       });
     } finally {
-      await callApi(repository, 'status');
+      await refreshStatus(repository);
     }
   });
 }
@@ -464,7 +496,7 @@ function revertCommit(repository, ref, { gitPath, expectedHead } = {}) {
   return run(repository, 'Reverting commit', async () => {
     if (!gitPath) throw new Error('Git executable unavailable.');
     try {
-      await queueGit(async () => {
+      await queueGit(repository, async () => {
         await assertExpectedHead(repository, gitPath, expectedHead);
         await assertNoOperation(repository, gitPath);
         const { stdout } = await execNow(repository, gitPath, ['rev-list', '--parents', '-n', '1', ref]);
@@ -474,7 +506,7 @@ function revertCommit(repository, ref, { gitPath, expectedHead } = {}) {
         await execNow(repository, gitPath, ['revert', '--no-edit', ref]);
       });
     } finally {
-      await callApi(repository, 'status');
+      await refreshStatus(repository);
     }
   });
 }

@@ -6,6 +6,7 @@ const fs = require('node:fs/promises');
 const Module = require('node:module');
 const os = require('node:os');
 const path = require('node:path');
+const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
 const originalLoad = Module._load;
@@ -72,10 +73,10 @@ function loadWithCli(vscode, spawn) {
   }
 }
 
-function fakeCli(onPrompt) {
+function fakeCli(onPrompt, exitCode = 0) {
   const child = new EventEmitter();
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
   child.kill = () => true;
   child.stdin = {
     on() {},
@@ -83,7 +84,7 @@ function fakeCli(onPrompt) {
       queueMicrotask(async () => {
         try {
           await onPrompt(prompt);
-          child.emit('close', 0);
+          child.emit('close', exitCode);
         } catch (error) {
           child.emit('error', error);
         }
@@ -110,6 +111,91 @@ function fakeVscode({ warning = () => undefined, error = () => undefined,
   };
 }
 
+test('preserves UTF-8 characters split across CLI output chunks', async () => {
+  const repository = {
+    rootUri: { fsPath: os.tmpdir() },
+    state: { indexChanges: [{ uri: { fsPath: path.join(os.tmpdir(), 'case.txt') } }] },
+    diff: async () => '+content',
+  };
+  for (const stream of ['stdout', 'stderr']) {
+    const output = 'feat: support café 🐱';
+    let notification;
+    const child = fakeCli(async () => {
+      for (const byte of Buffer.from(output)) child[stream].write(Buffer.from([byte]));
+    }, stream === 'stdout' ? 0 : 1);
+    const ai = loadWithCli(fakeVscode({ error: (message) => { notification = message; } }), () => child);
+    const result = await ai.generateCommitMessage(repository);
+    if (stream === 'stdout') assert.equal(result, output);
+    else {
+      assert.equal(result, undefined);
+      assert.equal(notification, `Commit message generation failed: ${output}`);
+    }
+  }
+});
+
+test('invalid effort settings fall back on read without activation writes', async () => {
+  const values = { reasoningEffort: 'xhigh', conflictReasoningEffort: 'max' };
+  const updates = [];
+  const configuration = {
+    get: (key, fallback) => values[key] ?? fallback,
+    inspect: (key) => ({ globalValue: values[key] }),
+    update: (...args) => { updates.push(args); },
+  };
+  const vscode = fakeVscode();
+  vscode.ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
+  vscode.workspace.getConfiguration = (section) => section === 'gitChangeStats'
+    ? configuration : { inspect: () => undefined };
+  const ai = loadWithCli(vscode);
+  await ai.normalizeConfiguration();
+  await ai.normalizeConfiguration();
+  assert.deepEqual(updates, []);
+  assert.equal(ai.aiSelection(configuration).effort, 'medium');
+  assert.equal(ai.aiSelection(configuration, true).effort, 'medium');
+});
+
+test('migrates legacy AI settings once at their original scopes', async () => {
+  const current = {};
+  const legacy = {
+    provider: { globalValue: 'claude' },
+    model: { workspaceValue: 'sonnet' },
+    reasoningEffort: { workspaceFolderValue: 'high' },
+  };
+  const targets = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
+  const scopes = { 1: 'globalValue', 2: 'workspaceValue', 3: 'workspaceFolderValue' };
+  const updates = [];
+  const vscode = fakeVscode();
+  vscode.ConfigurationTarget = targets;
+  vscode.workspace.getConfiguration = (section) => {
+    const values = section === 'gitChangeStats' ? current : legacy;
+    return {
+      get: (key, fallback) => values[key]?.workspaceFolderValue
+        ?? values[key]?.workspaceValue ?? values[key]?.globalValue ?? fallback,
+      inspect: (key) => values[key],
+      update: async (key, value, target) => {
+        updates.push([section, key, value, target]);
+        values[key] = { [scopes[target]]: value };
+      },
+    };
+  };
+  const ai = loadWithCli(vscode);
+  await ai.normalizeConfiguration();
+  assert.deepEqual(current, {
+    provider: { globalValue: 'claude' },
+    model: { workspaceValue: 'sonnet' },
+    reasoningEffort: { workspaceFolderValue: 'high' },
+  });
+  assert.deepEqual(updates, [
+    ['gitChangeStats', 'provider', 'claude', targets.Global],
+    ['gitChangeStats.ai', 'provider', undefined, targets.Global],
+    ['gitChangeStats', 'model', 'sonnet', targets.Workspace],
+    ['gitChangeStats.ai', 'model', undefined, targets.Workspace],
+    ['gitChangeStats', 'reasoningEffort', 'high', targets.WorkspaceFolder],
+    ['gitChangeStats.ai', 'reasoningEffort', undefined, targets.WorkspaceFolder],
+  ]);
+  await ai.normalizeConfiguration();
+  assert.equal(updates.length, 6);
+});
+
 test('only stages changed, resolved text conflicts', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bsc-ai-'));
   try {
@@ -132,6 +218,8 @@ test('only stages changed, resolved text conflicts', async () => {
       { name: 'resolved text', before: marked, after: 'combined\n', stages: true },
       { name: 'partial marker', before: marked, after: '<<<<<<< leftover\ncombined\n', stages: false },
       { name: 'unchanged text', before: marked, after: null, stages: false },
+      { name: 'deleted conflict', before: marked, after: null, deletes: true, stages: true },
+      { name: 'deleted unmarked conflict', before: 'ours\n', after: null, deletes: true, stages: false },
     ];
     for (const scenario of scenarios) {
       state.mergeChanges = [change];
@@ -139,7 +227,8 @@ test('only stages changed, resolved text conflicts', async () => {
       if (scenario.before === null) await fs.rm(file, { force: true });
       else await fs.writeFile(file, scenario.before);
       const child = fakeCli(async () => {
-        if (scenario.after !== null) await fs.writeFile(file, scenario.after);
+        if (scenario.deletes) await fs.rm(file, { force: true });
+        else if (scenario.after !== null) await fs.writeFile(file, scenario.after);
       });
       const ai = loadWithCli(fakeVscode({ warning: pendingWarning }), () => child);
       const result = await ai.resolveConflicts(repository);
@@ -189,8 +278,8 @@ test('cancellation stops the process group and waits for exit', {
     let launched;
     const started = new Promise((resolve) => { launched = resolve; });
     const child = new EventEmitter();
-    child.stdout = new EventEmitter();
-    child.stderr = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
     child.stdin = { on() {}, end() { launched(); } };
     child.pid = 43210;
     child.kill = () => assert.fail('child-only kill must not be used');

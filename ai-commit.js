@@ -148,7 +148,8 @@ async function resolveConflicts(repository) {
               resolved.push(change.uri.fsPath);
             }
           } catch (error) {
-            if (!['ENOENT', 'ELOOP'].includes(error?.code)) throw error;
+            if (error?.code === 'ENOENT') resolved.push(change.uri.fsPath);
+            else if (error?.code !== 'ELOOP') throw error;
           }
         }
         if (resolved.length) {
@@ -312,16 +313,6 @@ async function normalizeConfiguration() {
       await legacy.update(key, undefined, entry[1]);
     }
   }
-  for (const key of ['reasoningEffort', 'conflictReasoningEffort']) {
-    if (['low', 'medium', 'high'].includes(configuration.get(key, 'medium'))) continue;
-    const inspected = configuration.inspect(key);
-    const target = inspected?.workspaceFolderValue !== undefined
-      ? vscode.ConfigurationTarget.WorkspaceFolder
-      : inspected?.workspaceValue !== undefined
-        ? vscode.ConfigurationTarget.Workspace
-        : vscode.ConfigurationTarget.Global;
-    await configuration.update(key, 'medium', target);
-  }
 }
 
 async function buildPrompt(repository, includeUntrackedContent) {
@@ -456,6 +447,8 @@ function runCli(provider, model, effort, prompt, cwd, token, {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     let stdout = '';
     let stderr = '';
     let settled = false;

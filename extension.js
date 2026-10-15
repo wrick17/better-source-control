@@ -249,7 +249,8 @@ class RepositoryViewProvider {
       }, RENDER_INTERVAL_MS - (Date.now() - lastPostAt));
     };
     try {
-      for (const repository of openRepositories) {
+      // Reads start together so one slow repository cannot hold back the others' first render.
+      await Promise.all(openRepositories.map(async (repository) => {
         const id = repository.rootUri.fsPath;
         let snapshot;
         try {
@@ -266,7 +267,7 @@ class RepositoryViewProvider {
         this.snapshots.set(id, snapshot);
         if (Date.now() - lastPostAt >= RENDER_INTERVAL_MS) await post();
         else schedule();
-      }
+      }));
       await post();
     } catch (error) {
       clearTimeout(timer);

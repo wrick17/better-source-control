@@ -212,7 +212,10 @@ function noVerifyHooksPath(repository, gitPath) {
     await fs.mkdir(hooksDir);
     for (const name of await fs.readdir(activeDir).catch(() => [])) {
       const source = path.join(activeDir, name);
-      if (VERIFY_HOOKS.includes(name) || !(await fs.stat(source).catch(() => null))?.isFile()) continue;
+      const stat = await fs.stat(source).catch(() => null);
+      if (VERIFY_HOOKS.includes(name) || !stat?.isFile()) continue;
+      // Git skips non-executable hooks on POSIX, so the wrapper must not turn them on.
+      if (process.platform !== 'win32' && !(stat.mode & 0o111)) continue;
       // exec runs the original file, so $0 and paths relative to it keep working.
       const quoted = `'${source.replace(/'/g, `'\\''`)}'`;
       await fs.writeFile(path.join(hooksDir, name), `#!/bin/sh\nexec ${quoted} "$@"\n`, { mode: 0o755 });

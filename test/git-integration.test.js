@@ -181,6 +181,8 @@ test('No Verify cherry-pick and revert continuations skip only pre-commit and co
   // Sources a file relative to its own location, so the kept hook must still run from its original path.
   fs.writeFileSync(path.join(hooks, 'post-commit'),
     `#!/bin/sh\necho post-commit >> "${log}"\n. "$(dirname "$0")/lib/record.sh"\n`, { mode: 0o755 });
+  // Git ignores a non-executable hook on POSIX, so the continuation must not start running it.
+  if (process.platform !== 'win32') fs.writeFileSync(path.join(hooks, 'prepare-commit-msg'), '#!/bin/sh\nexit 1\n');
   git(repo, 'config', 'core.hooksPath', hooks);
   const hooksRun = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
 

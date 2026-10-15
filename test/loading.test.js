@@ -12,6 +12,8 @@ const authenticationRequests = [];
 const clipboardWrites = [];
 const informationMessages = [];
 let mergeEditor = false;
+let showNoVerifyButton = false;
+let inputBoxValue;
 let quickPickIndex = 0;
 let warningHandler;
 let errorHandler;
@@ -44,13 +46,16 @@ try {
           window: {
             showErrorMessage: (...args) => errorHandler?.(...args),
             showInformationMessage: async (value) => informationMessages.push(value),
+            showInputBox: async () => inputBoxValue,
             showQuickPick: async (choices) => choices[quickPickIndex],
             showWarningMessage: async (...args) => warningHandler?.(...args),
           },
           workspace: { getConfiguration: (section) => ({
             get: (key, fallback) => section === 'git' && key === 'mergeEditor'
               ? mergeEditor
-              : fallback,
+              : section === 'gitChangeStats' && key === 'showNoVerifyButton'
+                ? showNoVerifyButton
+                : fallback,
           }) },
         }
       : load(request, parent, isMain);
@@ -61,7 +66,7 @@ try {
   Module._load = load;
 }
 
-test('waits for the Git API before rendering repositories', async () => {
+test('renders repositories before the Git API finishes initializing', async () => {
   const posts = [];
   const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
     api: { state: 'uninitialized', repositories: [] },
@@ -70,6 +75,7 @@ test('waits for the Git API before rendering repositories', async () => {
     expansionTouched: new Set(),
     noVerify: new Set(),
     repositoryOrder: [],
+    snapshots: new Map(),
     stats: new Map(),
     viewMode: 'list',
     view: { webview: { postMessage: async (message) => posts.push(message) } },
@@ -79,7 +85,7 @@ test('waits for the Git API before rendering repositories', async () => {
   assert.equal(posts.at(-1).loading, true);
 
   provider.api = {
-    state: 'initialized',
+    state: 'uninitialized',
     repositories: [{
       rootUri: { fsPath: '/repo' },
       state: {
@@ -378,9 +384,38 @@ test('resolves GitHub remotes and opens commits and linked author profiles', asy
     'https://github.com/acme/project/commit/abc123',
     'https://github.com/ada',
   ]);
-  assert.deepEqual(authenticationRequests, [['github', ['repo'], { createIfNone: true }]]);
+  assert.deepEqual(authenticationRequests, [], 'A public author lookup must not request a GitHub session');
   assert.equal(request[0], 'https://api.github.com/repos/acme/project/commits/abc123');
-  assert.equal(request[1].headers.Authorization, 'Bearer token');
+  assert.equal(request[1].headers.Authorization, undefined);
+});
+
+test('signs in with the repo scope only after GitHub refuses an anonymous author lookup', async () => {
+  const commit = { hash: 'abc123' };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { repositories: [{ rootUri: { fsPath: '/repo' }, state: { remotes: [
+      { name: 'origin', fetchUrl: 'git@github.com:acme/private.git' },
+    ] } }] },
+    graph: { repositoryId: '/repo', commits: [commit] },
+  });
+  const originalFetch = global.fetch;
+  const requests = [];
+  global.fetch = async (url, { headers }) => {
+    requests.push(headers.Authorization);
+    return headers.Authorization
+      ? { ok: true, json: async () => ({ author: { html_url: 'https://github.com/ada' } }) }
+      : { ok: false, status: 404 };
+  };
+  authenticationRequests.length = 0;
+  openedExternal.length = 0;
+  try {
+    await provider.handleMessage({ type: 'graphOpenAuthor', repositoryId: '/repo', hash: commit.hash });
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.deepEqual(requests, [undefined, 'Bearer token']);
+  assert.deepEqual(authenticationRequests, [['github', ['repo'], { createIfNone: true }]]);
+  assert.deepEqual(openedExternal, ['https://github.com/ada']);
 });
 
 test('copies the selected GitHub commit link and leaves the clipboard alone without a GitHub remote', async () => {
@@ -557,7 +592,7 @@ test('collapses and re-expands the graph without discarding its repository', asy
   assert.equal(posts.length, 2);
 });
 
-test('reports repository loading failures instead of leaving the view loading', async () => {
+test('reports a repository that fails to load instead of leaving the view loading', async () => {
   const posts = [];
   const errors = [];
   const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
@@ -573,6 +608,7 @@ test('reports repository loading failures instead of leaving the view loading', 
     stats: new Map(),
     viewMode: 'list',
     view: { webview: { postMessage: async (message) => posts.push(message) } },
+    snapshots: new Map(),
     repositoryData: async () => { throw new Error('broken repository'); },
     log: { error: (...args) => errors.push(args) },
   });
@@ -580,8 +616,89 @@ test('reports repository loading failures instead of leaving the view loading', 
   await provider.refresh();
 
   assert.equal(posts.at(-1).loading, false);
-  assert.match(posts.at(-1).error, /Output panel/);
+  assert.equal(posts.at(-1).error, undefined);
+  assert.equal(posts.at(-1).repositories[0].id, '/repo');
+  assert.match(posts.at(-1).repositories[0].error, /Output panel/);
   assert.equal(errors.length, 1);
+});
+
+test('keeps the other repositories visible when one fails to load', async () => {
+  const posts = [];
+  const repository = (fsPath) => ({ rootUri: { fsPath }, state: {} });
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [repository('/bad'), repository('/good')] },
+    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    snapshots: new Map(), stats: new Map(), viewMode: 'list',
+    view: { webview: { postMessage: async (message) => posts.push(message) } },
+    repositoryData: async ({ rootUri }) => {
+      if (rootUri.fsPath === '/bad') throw new Error('broken repository');
+      return { id: rootUri.fsPath, name: 'good' };
+    },
+    scheduleStats() {},
+    log: { error() {} },
+  });
+
+  await provider.refresh();
+
+  const [failed, loaded] = posts.at(-1).repositories;
+  assert.deepEqual([failed.id, loaded.id], ['/bad', '/good']);
+  assert.match(failed.error, /Output panel/);
+  assert.equal(loaded.error, undefined);
+});
+
+test('progressive renders wait out the 100 ms window, and the final render is not delayed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
+  const posts = [];
+  const repository = (fsPath) => ({ rootUri: { fsPath }, state: {} });
+  let finishC;
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [repository('/a'), repository('/b'), repository('/c')] },
+    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    snapshots: new Map(), stats: new Map(), viewMode: 'list',
+    view: { webview: { postMessage: async (message) => posts.push(message) } },
+    repositoryData: ({ rootUri }) => rootUri.fsPath === '/c'
+      ? new Promise((resolve) => { finishC = resolve; })
+      : { id: rootUri.fsPath },
+    scheduleStats() {},
+  });
+  const renders = () => posts.filter((message) => !message.loading)
+    .map((message) => message.repositories.map(({ id }) => id));
+
+  const done = provider.refresh();
+  await new Promise(setImmediate);
+  assert.deepEqual(renders(), [['/a']], 'The first ready repository paints at once');
+  t.mock.timers.tick(99);
+  assert.deepEqual(renders(), [['/a']], 'A read inside the 100 ms window waits for it to close');
+  t.mock.timers.tick(1);
+  assert.deepEqual(renders(), [['/a'], ['/a', '/b']]);
+
+  finishC({ id: '/c' });
+  await done;
+  assert.deepEqual(renders(), [['/a'], ['/a', '/b'], ['/a', '/b', '/c']],
+    'The final render goes out immediately instead of waiting for the window');
+  t.mock.timers.tick(100);
+  assert.equal(renders().length, 3, 'No stale timer repaints after the final render');
+});
+
+test('a failed repository row shows its error note without throwing', () => {
+  const markup = html();
+  const el = (tag, className = '', text) => ({
+    tag, className, text, children: [], dataset: {},
+    append(...nodes) { this.children.push(...nodes); },
+    setAttribute() {}, addEventListener() {},
+    classList: { toggle() {} },
+  });
+  const context = vm.createContext({
+    el, model: { expanded: [] }, busy: new Map(),
+    icon: (_, className) => el('svg', className), button: () => el('button'),
+    menuItem: () => el('button'), menuSeparator: () => el('hr'), clearDropState() {}, suppressToggleUntil: 0,
+  });
+  vm.runInContext(markup.slice(markup.indexOf('    function renderRepository('), markup.indexOf('    function renderDetails(')), context);
+
+  const section = context.renderRepository({ id: '/bad', name: 'bad', error: 'Unable to load this repository.' });
+
+  assert.equal(section.children.at(-1).text, 'Unable to load this repository.');
+  assert.equal(section.children[0].children.find((node) => node.className === 'repo-name').text, 'bad');
 });
 
 test('keeps the last completed stats visible while refreshing them', () => {
@@ -600,6 +717,7 @@ test('keeps the last completed stats visible while refreshing them', () => {
     dirtyStats: new Set(),
     repositoryListeners: [],
     scheduleRefresh() {},
+    snapshots: new Map(),
     stats: new Map([['/repo', stats]]),
   });
 
@@ -610,28 +728,200 @@ test('keeps the last completed stats visible while refreshing them', () => {
   assert.equal(provider.dirtyStats.has('/repo'), true);
 });
 
-test('stops a superseded repository refresh', async () => {
+test('a superseded refresh neither overwrites a newer snapshot nor reads further repositories', async () => {
   const repository = (fsPath) => ({ rootUri: { fsPath }, state: {} });
   const calls = [];
+  const posts = [];
+  let finishStale;
   const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
-    api: {
-      state: 'initialized',
-      repositories: [repository('/a'), repository('/b')],
-    },
-    expanded: new Set(),
-    expansionTouched: new Set(),
-    repositoryOrder: [],
-    view: { webview: { postMessage: async () => {} } },
-    repositoryData: async ({ rootUri }) => {
+    api: { state: 'initialized', repositories: [repository('/a'), repository('/b')] },
+    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    snapshots: new Map(), stats: new Map(), viewMode: 'list',
+    view: { webview: { postMessage: async (message) => posts.push(message) } },
+    repositoryData: ({ rootUri }) => {
       calls.push(rootUri.fsPath);
-      provider.refreshId += 1;
-      return {};
+      if (calls.length === 1) return new Promise((resolve) => { finishStale = resolve; });
+      return { id: rootUri.fsPath, name: 'new' };
     },
+    scheduleStats() {},
+    log: { error() {} },
   });
 
+  const stale = provider.refresh();
+  await new Promise(setImmediate);
   await provider.refresh();
+  finishStale({ id: '/a', name: 'stale' });
+  await stale;
 
-  assert.deepEqual(calls, ['/a']);
+  assert.equal(provider.snapshots.get('/a').name, 'new');
+  assert.deepEqual(posts.at(-1).repositories.map(({ name }) => name), ['new', 'new']);
+  assert.deepEqual(calls, ['/a', '/a', '/b'], 'The superseded refresh must not read /b');
+});
+
+test('a superseded refresh sends no final render after its held progressive render is released', async () => {
+  const repository = { rootUri: { fsPath: '/a' }, state: {} };
+  const posts = [];
+  let holdNext = true;
+  let release;
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [repository] },
+    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    snapshots: new Map(), stats: new Map(), viewMode: 'list',
+    view: { webview: { postMessage: async (message) => {
+      posts.push(message);
+      if (holdNext && !message.loading) {
+        holdNext = false;
+        await new Promise((resolve) => { release = resolve; });
+      }
+    } } },
+    repositoryData: async ({ rootUri }) => ({ id: rootUri.fsPath, name: 'current' }),
+    scheduleStats() {},
+  });
+
+  const stale = provider.refresh();
+  await new Promise(setImmediate);
+  await provider.refresh();
+  const sent = posts.length;
+  release();
+  await stale;
+
+  assert.equal(posts.length, sent, 'A superseded refresh must not post its final render');
+});
+
+test('shows repositories as their data arrives and keeps unfinished ones steady', async () => {
+  const posts = [];
+  const ids = (message) => message.repositories.map(({ id }) => id);
+  const repo = (fsPath) => ({ rootUri: { fsPath }, state: {} });
+  let release = () => {};
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [repo('/a'), repo('/b')] },
+    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    snapshots: new Map(), stats: new Map(), viewMode: 'list',
+    view: { webview: { postMessage: async (message) => posts.push(message) } },
+    repositoryData: async ({ rootUri }) => {
+      if (rootUri.fsPath === '/b') await new Promise((resolve) => { release = resolve; });
+      return { id: rootUri.fsPath };
+    },
+    scheduleStats() {},
+  });
+
+  const first = provider.refresh();
+  await new Promise(setImmediate);
+  assert.deepEqual(ids(posts.at(-1)), ['/a'], 'The ready repository must paint before the others');
+  release();
+  await first;
+  assert.deepEqual(ids(posts.at(-1)), ['/a', '/b']);
+
+  const second = provider.refresh();
+  await new Promise(setImmediate);
+  assert.deepEqual(ids(posts.at(-1)), ['/a', '/b'], 'A refresh must not drop rows it has not reloaded yet');
+  release();
+  await second;
+});
+
+test('a No Verify choice applies to one hook-skipping operation, then operations verify again', async () => {
+  const pushOptions = [];
+  const amendOptions = [];
+  const saved = [];
+  const posts = [];
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: {
+      HEAD: { name: 'main', commit: 'abc' },
+      indexChanges: [], mergeChanges: [], untrackedChanges: [], workingTreeChanges: [],
+    },
+  };
+  const commit = { hash: 'abc', message: 'Old message', parents: [] };
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [repository], git: {} },
+    context: { workspaceState: { update: async (...args) => saved.push(args) } },
+    noVerify: new Set(['/repo']),
+    dirtyStats: new Set(), expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
+    snapshots: new Map(), stats: new Map(), viewMode: 'list',
+    graph: { repositoryId: '/repo', head: 'abc', commits: [commit], limit: 50 },
+    view: { webview: { postMessage: async (message) => posts.push(message) } },
+    loadGraph: async () => {},
+    scheduleStats() {},
+  });
+  const { amendMessage, push } = git;
+  git.push = async (_repository, options) => { pushOptions.push(options.noVerify); return true; };
+  git.amendMessage = async (_repository, _message, options) => { amendOptions.push(options.noVerify); return true; };
+  showNoVerifyButton = true;
+  inputBoxValue = 'Reworded';
+  try {
+    await provider.handleMessage({ type: 'operation', operation: 'push', repositoryId: '/repo' });
+    assert.deepEqual(pushOptions, [true]);
+    assert.equal(provider.noVerify.has('/repo'), false);
+    assert.deepEqual(saved.at(-1), ['gitChangeStats.noVerifyRepositories', []]);
+    assert.equal(posts.at(-1).repositories[0].noVerify, false, 'The button must show off after the operation');
+
+    await provider.handleMessage({ type: 'operation', operation: 'push', repositoryId: '/repo' });
+    assert.deepEqual(pushOptions, [true, false]);
+
+    provider.noVerify.add('/repo');
+    await provider.amendGraphCommitMessage(repository, commit);
+    assert.deepEqual(amendOptions, [true]);
+    assert.equal(provider.noVerify.has('/repo'), false, 'Amend must clear the flag too');
+    assert.equal(posts.at(-1).repositories[0].noVerify, false);
+  } finally {
+    git.amendMessage = amendMessage;
+    git.push = push;
+    showNoVerifyButton = false;
+    inputBoxValue = undefined;
+  }
+});
+
+test('each continuation that honors No Verify passes it to Git and spends it', async () => {
+  const continued = [];
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [{ rootUri: { fsPath: '/repo' }, state: {} }], git: {} },
+    context: { workspaceState: { update: async () => {} } },
+    noVerify: new Set(),
+  });
+  const { continueOperation } = git;
+  git.continueOperation = async (_repository, operation, _message, options) => {
+    continued.push([operation, options.noVerify]);
+    return true;
+  };
+  showNoVerifyButton = true;
+  try {
+    for (const operation of ['merge', 'rebase', 'cherry-pick', 'revert']) {
+      provider.noVerify.add('/repo');
+      await provider.handleMessage({ type: 'continueOperation', operation, repositoryId: '/repo' });
+      assert.equal(provider.noVerify.has('/repo'), false, `${operation} continuation must spend No Verify`);
+    }
+    assert.deepEqual(continued, [['merge', true], ['rebase', true], ['cherry-pick', true], ['revert', true]]);
+  } finally {
+    git.continueOperation = continueOperation;
+    showNoVerifyButton = false;
+  }
+});
+
+test('a continuation Git rejects keeps No Verify for the next one', async () => {
+  const continued = [];
+  let accept = false;
+  const provider = Object.assign(Object.create(RepositoryViewProvider.prototype), {
+    api: { state: 'initialized', repositories: [{ rootUri: { fsPath: '/repo' }, state: {} }], git: {} },
+    context: { workspaceState: { update: async () => {} } },
+    noVerify: new Set(['/repo']),
+  });
+  const { continueOperation } = git;
+  git.continueOperation = async (_repository, operation, _message, options) => {
+    continued.push([operation, options.noVerify]);
+    return accept;
+  };
+  showNoVerifyButton = true;
+  try {
+    await provider.handleMessage({ type: 'continueOperation', operation: 'merge', repositoryId: '/repo' });
+    assert.equal(provider.noVerify.has('/repo'), true, 'A rejected continuation must not spend No Verify');
+    accept = true;
+    await provider.handleMessage({ type: 'continueOperation', operation: 'merge', repositoryId: '/repo' });
+    assert.deepEqual(continued, [['merge', true], ['merge', true]]);
+    assert.equal(provider.noVerify.has('/repo'), false);
+  } finally {
+    git.continueOperation = continueOperation;
+    showNoVerifyButton = false;
+  }
 });
 
 test('reorders repositories and remembers the workspace order', async () => {
@@ -1000,7 +1290,7 @@ test('activity badge totals unique changed files across repositories and clears 
     api: { state: 'initialized', repositories: [first, second] },
     view: { visible: false, webview: { postMessage: async () => {} } },
     expanded: new Set(), expansionTouched: new Set(), repositoryOrder: [],
-    repositoryData: async () => ({}), scheduleStats() {},
+    repositoryData: async () => ({}), scheduleStats() {}, snapshots: new Map(),
   });
   await provider.refresh();
   assert.deepEqual(provider.view.badge, { value: 3, tooltip: '3 changed files' });

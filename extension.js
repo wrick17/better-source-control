@@ -17,6 +17,8 @@ const { loadIconTheme, fileIcon } = require('./file-icons');
 
 const VIEW_ID = 'gitChangeStats.repositories';
 const GRAPH_PAGE_SIZE = 50;
+const RENDER_INTERVAL_MS = 100;
+const NO_VERIFY_OPERATIONS = ['pullMerge', 'pullRebase', 'pullFrom', 'push', 'publish'];
 const BUSY_MESSAGE_TYPES = new Set([
   'operation', 'commit', 'continueOperation', 'resolveConflicts', 'abortOperation', 'branch',
   'stage', 'unstage', 'stageAll', 'unstageAll', 'discard', 'discardAll',
@@ -60,6 +62,7 @@ class RepositoryViewProvider {
     this.noVerify = new Set(context.workspaceState.get('gitChangeStats.noVerifyRepositories', []));
     this.repositoryOrder = context.workspaceState.get('gitChangeStats.repositoryOrder', []);
     this.stats = new Map();
+    this.snapshots = new Map();
     this.dirtyStats = new Set();
     this.generating = new Set();
     this.busyRepositories = new Set();
@@ -120,7 +123,7 @@ class RepositoryViewProvider {
     const repository = tracked ? path.basename(message.repositoryId) : undefined;
     if (tracked && this.busyRepositories.has(message.repositoryId)) {
       this.log?.warn(`[${repository}] ${label} ignored because another operation is running.`);
-      return;
+      return 'busy';
     }
     const startedAt = tracked ? Date.now() : undefined;
     if (tracked) {
@@ -133,8 +136,9 @@ class RepositoryViewProvider {
         label,
       });
     }
+    let outcome;
     try {
-      await this.handleMessage(message);
+      outcome = await this.handleMessage(message);
       if (tracked) this.log?.info(`[${repository}] ${label} finished in ${Date.now() - startedAt} ms.`);
     } catch (error) {
       this.log?.error(
@@ -156,6 +160,7 @@ class RepositoryViewProvider {
         });
       }
     }
+    return outcome;
   }
 
   syncRepositories() {
@@ -166,6 +171,7 @@ class RepositoryViewProvider {
       this.postGraph();
     }
     for (const id of this.stats.keys()) if (!openIds.has(id)) this.stats.delete(id);
+    for (const id of this.snapshots.keys()) if (!openIds.has(id)) this.snapshots.delete(id);
     for (const id of this.dirtyStats) if (!openIds.has(id)) this.dirtyStats.delete(id);
     this.repositoryListeners.push(
       ...this.api.repositories.map((repository) =>
@@ -195,7 +201,7 @@ class RepositoryViewProvider {
       ? this.api.repositories.reduce((total, repository) => total + changedFileCount(repository.state), 0) : 0;
     this.view.badge = files ? { value: files, tooltip: `${files} changed ${files === 1 ? 'file' : 'files'}` } : undefined;
     const refreshId = this.refreshId = (this.refreshId ?? 0) + 1;
-    if (this.api.state !== 'initialized') {
+    if (this.api.state !== 'initialized' && !this.api.repositories.length) {
       await this.view.webview.postMessage({ type: 'render', loading: true, repositories: [] });
       return;
     }
@@ -217,13 +223,53 @@ class RepositoryViewProvider {
       const id = repository.rootUri.fsPath;
       if (changedFileCount(repository.state) && !this.expansionTouched.has(id)) this.expanded.add(id);
     }
-    const repositories = [];
+    // Show each repository as its data arrives; unfinished ones keep their last snapshot.
+    // Renders are coalesced so N repositories send O(N) snapshots, with a final render at the end.
+    let lastPostAt = 0;
+    let timer;
+    const post = () => {
+      clearTimeout(timer);
+      timer = undefined;
+      if (refreshId !== this.refreshId) return;
+      lastPostAt = Date.now();
+      return this.view?.webview.postMessage({
+        type: 'render',
+        loading: false,
+        repositories: openRepositories
+          .filter((repository) => this.snapshots.has(repository.rootUri.fsPath))
+          .map((repository) => this.snapshots.get(repository.rootUri.fsPath)),
+        expanded: [...this.expanded],
+        viewMode: this.viewMode,
+      });
+    };
+    const schedule = () => {
+      timer ??= setTimeout(() => {
+        timer = undefined;
+        if (refreshId === this.refreshId) void post();
+      }, RENDER_INTERVAL_MS - (Date.now() - lastPostAt));
+    };
     try {
       for (const repository of openRepositories) {
-        repositories.push(await this.repositoryData(repository));
-        if (refreshId !== this.refreshId) return;
+        const id = repository.rootUri.fsPath;
+        let snapshot;
+        try {
+          snapshot = await this.repositoryData(repository);
+        } catch (error) {
+          this.log?.error(`Failed to load ${repositoryName(repository)}.`, error);
+          const previous = this.snapshots.get(id) ?? { id, name: repositoryName(repository) };
+          snapshot = { ...previous, error: 'Unable to load this repository. See the Output panel.' };
+        }
+        if (refreshId !== this.refreshId) {
+          clearTimeout(timer);
+          return;
+        }
+        this.snapshots.set(id, snapshot);
+        if (Date.now() - lastPostAt >= RENDER_INTERVAL_MS) await post();
+        else schedule();
       }
+      await post();
     } catch (error) {
+      clearTimeout(timer);
       this.log?.error('Failed to load repositories.', error);
       if (refreshId === this.refreshId) {
         await this.view.webview.postMessage({
@@ -235,14 +281,6 @@ class RepositoryViewProvider {
       }
       return;
     }
-    if (refreshId !== this.refreshId) return;
-    await this.view.webview.postMessage({
-      type: 'render',
-      loading: false,
-      repositories,
-      expanded: [...this.expanded],
-      viewMode: this.viewMode,
-    });
     this.scheduleStats(openRepositories);
   }
 
@@ -336,6 +374,12 @@ class RepositoryViewProvider {
     this.noVerify.has(repositoryId) ? this.noVerify.delete(repositoryId) : this.noVerify.add(repositoryId);
     await this.context.workspaceState.update('gitChangeStats.noVerifyRepositories', [...this.noVerify]);
     await this.refresh();
+  }
+
+  // No Verify is one-shot: the hook-skipping operation that consumed it clears it.
+  async clearNoVerify(repositoryId) {
+    this.noVerify.delete(repositoryId);
+    await this.context.workspaceState.update('gitChangeStats.noVerifyRepositories', [...this.noVerify]);
   }
 
   repository(id) {
@@ -605,17 +649,14 @@ class RepositoryViewProvider {
       await vscode.env.openExternal(vscode.Uri.parse(`${remote.url}/commit/${commit.hash}`));
       return;
     }
-    const session = await vscode.authentication.getSession('github', ['repo'], { createIfNone: true });
-    const response = await fetch(
-      `https://api.github.com/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.repo)}/commits/${encodeURIComponent(commit.hash)}`,
-      {
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${session.accessToken}`,
-          'X-GitHub-Api-Version': '2026-03-10',
-        },
-      },
-    );
+    const url = `https://api.github.com/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.repo)}/commits/${encodeURIComponent(commit.hash)}`;
+    const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10' };
+    let response = await fetch(url, { headers });
+    // GitHub hides private repositories from anonymous requests, so sign in only after a refusal.
+    if ([401, 403, 404].includes(response.status)) {
+      const session = await vscode.authentication.getSession('github', ['repo'], { createIfNone: true });
+      response = await fetch(url, { headers: { ...headers, Authorization: `Bearer ${session.accessToken}` } });
+    }
     if (!response.ok) throw new Error(`GitHub returned ${response.status} while resolving the commit author.`);
     const profile = (await response.json()).author?.html_url;
     if (!profile) {
@@ -733,6 +774,10 @@ class RepositoryViewProvider {
     if (await git.amendMessage(repository, message, {
       noVerify, gitPath: this.api.git.path, expectedHead: { name: head.name, commit: head.commit },
     })) {
+      if (noVerify) {
+        await this.clearNoVerify(repository.rootUri.fsPath);
+        await this.refresh();
+      }
       this.graph.selectedHash = undefined;
       this.graph.details = undefined;
       await this.loadGraph();
@@ -984,8 +1029,14 @@ class RepositoryViewProvider {
         .get('showNoVerifyButton', false) && this.noVerify.has(message.repositoryId),
       gitPath: this.api.git.path,
     };
+    // No Verify is spent only when its hook-skipping command reports success.
+    const consumesNoVerify = operationOptions.noVerify && (message.type === 'commit'
+      || (message.type === 'continueOperation' && ['merge', 'rebase', 'cherry-pick', 'revert'].includes(message.operation))
+      || (message.type === 'operation' && NO_VERIFY_OPERATIONS.includes(message.operation)));
+    let outcome;
+    let succeeded;
     if (message.type === 'continueOperation' && ['merge', 'rebase', 'cherry-pick', 'revert'].includes(message.operation)) {
-      await git.continueOperation(repository, message.operation, message.message, operationOptions);
+      succeeded = await git.continueOperation(repository, message.operation, message.message, operationOptions);
     } else if (message.type === 'resolveConflicts'
       && ['merge', 'rebase', 'cherry-pick', 'revert'].includes(message.operation)
       && repository.state.mergeChanges.length) {
@@ -997,9 +1048,11 @@ class RepositoryViewProvider {
       'fetch', 'pullMerge', 'pullRebase', 'pullFrom', 'push', 'publish', 'resetToOrigin',
       'stash', 'popStashSelected', 'popStash', 'viewStash', 'applyStash', 'createWorktree',
     ].includes(message.operation)) {
-      await git[message.operation](repository, operationOptions);
+      outcome = await git[message.operation](repository, operationOptions);
+      succeeded = outcome;
     } else if (message.type === 'commit') {
-      if (await git.commit(repository, message.message, operationOptions)) {
+      succeeded = await git.commit(repository, message.message, operationOptions);
+      if (succeeded) {
         await this.view?.webview.postMessage({
           type: 'committed',
           repositoryId: message.repositoryId,
@@ -1068,7 +1121,9 @@ class RepositoryViewProvider {
       if (change) await openDiff(this.api, repository, message.kind, change);
       return;
     }
+    if (consumesNoVerify && succeeded) await this.clearNoVerify(message.repositoryId);
     await this.refresh();
+    return outcome;
   }
 
   async repositoryData(repository) {
@@ -1923,7 +1978,9 @@ function html() {
       row.append(
         repository.expandable
           ? icon('chevron', 'icon chevron', (expanded ? 'Collapse ' : 'Expand ') + repository.name)
-          : icon('check', 'icon clean-indicator', repository.name + ' is clean'),
+          : repository.error
+            ? icon('abort', 'icon', repository.name + ' could not be loaded')
+            : icon('check', 'icon clean-indicator', repository.name + ' is clean'),
         el('span', 'repo-name', repository.name),
       );
       if (repository.operation) {
@@ -1952,7 +2009,7 @@ function html() {
         row.append(sync);
       }
       const meta = el('span', 'repo-meta');
-      const branch = button(repository.branch, 'Switch branch', () => post('branch', repository), 'branch');
+      const branch = button(repository.branch ?? '', 'Switch branch', () => post('branch', repository), 'branch');
       if (repository.files) {
         const stats = el('span', 'repo-stats');
         stats.dataset.tooltip = repository.statsLabel
@@ -2076,6 +2133,7 @@ function html() {
       );
       row.append(meta, actions);
       section.append(row);
+      if (repository.error) section.append(el('div', 'graph-meta stats-warning', repository.error));
       if (repository.expandable) {
         const details = renderDetails(repository);
         details.hidden = !expanded;
@@ -2099,6 +2157,7 @@ function html() {
       const progressLabel = busy.get(repository.id);
       const input = el('textarea');
       input.rows = 1;
+      input.setAttribute('aria-label', 'Commit message for ' + repository.name);
       input.placeholder = repository.operation
         ? repository.operation[0].toUpperCase() + repository.operation.slice(1) + ' commit message'
         : repository.stagedCount
@@ -2318,6 +2377,8 @@ function html() {
 
       const file = el('div', 'file');
       file.tabIndex = 0;
+      file.setAttribute('role', 'button');
+      file.setAttribute('aria-label', node.name + ', status ' + node.badge);
       file.dataset.kind = kind;
       file.dataset.badge = node.badge;
       file.dataset.relativePath = node.relativePath;
@@ -2400,6 +2461,8 @@ function html() {
       resizer.setAttribute('role', 'separator');
       resizer.setAttribute('aria-label', 'Resize commit graph');
       resizer.setAttribute('aria-orientation', 'horizontal');
+      resizer.setAttribute('aria-valuemin', '160');
+      resizer.setAttribute('aria-valuemax', String(Math.max(160, innerHeight - 140)));
       resizer.addEventListener('pointerdown', (event) => {
         event.preventDefault();
         resizer.setPointerCapture(event.pointerId);
@@ -2886,6 +2949,17 @@ async function activate(context) {
     log,
     vscode.commands.registerCommand('gitChangeStats.showOutput', () => log.show()),
   );
+  // Single-repository runs report through their own messages; only batch runs get a summary.
+  const showRunSummary = (verb, outcomes) => {
+    if (outcomes.length < 2) return;
+    const succeeded = outcomes.filter((outcome) => outcome === true).length;
+    const busy = outcomes.filter((outcome) => outcome === 'busy').length;
+    const failed = outcomes.length - succeeded - busy;
+    const parts = [`${verb} ${succeeded} of ${outcomes.length} repositories.`];
+    if (busy) parts.push(`${busy} skipped because ${busy === 1 ? 'it was' : 'they were'} busy.`);
+    if (failed) parts.push(`${failed} failed.`);
+    void vscode.window.showInformationMessage(parts.join(' '));
+  };
   log.info(`Activating Better Source Control ${context.extension.packageJSON.version}.`);
   const gitExtension = vscode.extensions.getExtension('vscode.git');
   if (!gitExtension) {
@@ -2934,22 +3008,24 @@ async function activate(context) {
     vscode.commands.registerCommand('gitChangeStats.fetchAll', async () => {
       const repositories = [...api.repositories];
       log.info(`Fetching all ${repositories.length} repositories.`);
-      await Promise.all(repositories.map((repository) => provider.receiveMessage({
+      const outcomes = await Promise.all(repositories.map((repository) => provider.receiveMessage({
         type: 'operation',
         operation: 'fetch',
         repositoryId: repository.rootUri.fsPath,
       })));
       log.info(`Finished fetching all ${repositories.length} repositories.`);
+      showRunSummary('Fetched', outcomes);
     }),
     vscode.commands.registerCommand('gitChangeStats.pullAll', async () => {
       const repositories = [...api.repositories];
       log.info(`Pulling all ${repositories.length} repositories.`);
-      await Promise.all(repositories.map((repository) => provider.receiveMessage({
+      const outcomes = await Promise.all(repositories.map((repository) => provider.receiveMessage({
         type: 'operation',
         operation: 'pullMerge',
         repositoryId: repository.rootUri.fsPath,
       })));
       log.info(`Finished pulling all ${repositories.length} repositories.`);
+      showRunSummary('Pulled', outcomes);
     }),
     vscode.commands.registerCommand('gitChangeStats.listView', () => provider.setViewMode('list')),
     vscode.commands.registerCommand('gitChangeStats.treeView', () => provider.setViewMode('tree')),

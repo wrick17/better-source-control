@@ -38,6 +38,7 @@ fakeExecFile[Symbol.for('nodejs.util.promisify.custom')] = (...args) => execFile
 const originalLoad = Module._load;
 let showErrorMessage = async () => {};
 let showWarningMessageImpl = async (...args) => args.at(-1);
+let showQuickPickImpl = async (items) => items[0];
 Module._load = function load(request, parent, isMain) {
   if (request === 'node:child_process') {
     return { execFile: fakeExecFile };
@@ -53,7 +54,7 @@ Module._load = function load(request, parent, isMain) {
         withProgress: async (_, action) => action(),
         showErrorMessage: (...args) => showErrorMessage(...args),
         showInformationMessage: async () => {},
-        showQuickPick: async (items) => items[0],
+        showQuickPick: (...args) => showQuickPickImpl(...args),
         showWarningMessage: (...args) => showWarningMessageImpl(...args),
       },
     };
@@ -171,6 +172,7 @@ test('pull and push use native APIs normally and shell-free no-verify fallbacks'
     ['push', '--no-verify'],
   ]);
   assert.ok(gitExecCalls.every(([, , options]) => options.timeout === 300_000 && options.killSignal === 'SIGKILL'));
+  assert.ok(gitExecCalls.every(([, , options]) => options.maxBuffer === 16 * 1024 * 1024));
 });
 
 test('fetch uses the native repository API', async () => {
@@ -189,7 +191,7 @@ test('fetch uses the native repository API', async () => {
   }
 });
 
-test('serializes direct Git processes', async () => {
+test('serializes direct Git processes for the same repository root', async () => {
   let active = 0;
   let maxActive = 0;
   const original = execFileImpl;
@@ -201,15 +203,127 @@ test('serializes direct Git processes', async () => {
   };
   const repository = (fsPath) => ({
     rootUri: { fsPath },
-    state: { mergeChanges: [] },
   });
 
   try {
     await Promise.all([
-      operationState(repository('/a'), { gitPath: '/git' }),
-      operationState(repository('/b'), { gitPath: '/git' }),
+      execGitCommand(repository('/a'), '/git', ['status']),
+      execGitCommand(repository('/a'), '/git', ['diff']),
     ]);
     assert.equal(maxActive, 1);
+  } finally {
+    execFileImpl = original;
+  }
+});
+
+test('a slow Git process does not block another repository', async () => {
+  const original = execFileImpl;
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  execFileImpl = async (_file, _args, options) => {
+    if (options.cwd === '/slow') await blocked;
+    return { stdout: '', stderr: '' };
+  };
+  const slow = execGitCommand({ rootUri: { fsPath: '/slow' } }, '/git', ['diff']);
+  let completed = false;
+  const fast = execGitCommand({ rootUri: { fsPath: '/fast' } }, '/git', ['status'])
+    .then(() => { completed = true; });
+  try {
+    await new Promise(setImmediate);
+    assert.equal(completed, true);
+  } finally {
+    release();
+    await Promise.allSettled([slow, fast]);
+    execFileImpl = original;
+  }
+});
+
+test('operation checks reuse the Git directory per repository root and executable', async () => {
+  gitExecCalls.length = 0;
+  const repository = { rootUri: { fsPath: '/cached-repo' }, state: {}, status: async () => {} };
+  const options = { gitPath: '/git' };
+  await Promise.all([
+    operationState(repository, options),
+    operationState({ ...repository }, options),
+  ]);
+  await operationState(repository, options);
+  gitRefStates.add('CHERRY_PICK_HEAD');
+  try {
+    assert.equal(await operationState(repository, options), 'cherry-pick');
+    assert.equal(gitExecCalls.filter(([, args]) => args.includes('--absolute-git-dir')).length, 1);
+    await operationState(repository, { gitPath: '/other-git' });
+    await operationState({ ...repository, rootUri: { fsPath: '/other-cached-repo' } }, options);
+    assert.equal(gitExecCalls.filter(([, args]) => args.includes('--absolute-git-dir')).length, 3);
+  } finally {
+    gitRefStates.clear();
+  }
+});
+
+test('operation checks refresh a cached Git directory after time passes', async (t) => {
+  const originalExec = execFileImpl;
+  const originalRead = readMarkerImpl;
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  let gitDir = '/before/.git';
+  execFileImpl = async (file, args, options) => args.includes('--absolute-git-dir')
+    ? { stdout: `${gitDir}\n`, stderr: '' } : originalExec(file, args, options);
+  readMarkerImpl = async (file) => file === '/after/.git/CHERRY_PICK_HEAD'
+    ? `${fetchedCommit}\n` : originalRead(file);
+  const repository = { rootUri: { fsPath: '/reopened-repo' }, state: {} };
+  try {
+    assert.equal(await operationState(repository, { gitPath: '/git' }), undefined);
+    gitDir = '/after/.git';
+    now += 60_000;
+    assert.equal(await operationState({ ...repository }, { gitPath: '/git' }), 'cherry-pick');
+  } finally {
+    execFileImpl = originalExec;
+    readMarkerImpl = originalRead;
+  }
+});
+
+test('reset and rollback guard the current Git directory even while the refresh cache is warm', async () => {
+  const originalExec = execFileImpl;
+  const originalRead = readMarkerImpl;
+  let gitDir = '/before/.git';
+  execFileImpl = async (file, args, options) => args.includes('--absolute-git-dir')
+    ? { stdout: `${gitDir}\n`, stderr: '' } : originalExec(file, args, options);
+  readMarkerImpl = async (file) => file === '/after/.git/CHERRY_PICK_HEAD'
+    ? `${fetchedCommit}\n` : originalRead(file);
+  const repository = {
+    rootUri: { fsPath: '/guarded-reopened-repo' },
+    state: {
+      HEAD: { name: 'feature', commit: firstCommit }, mergeChanges: [],
+      remotes: [{ name: 'origin', fetchUrl: 'git@example/repo.git' }],
+    },
+    status: async () => {},
+  };
+  try {
+    await operationState(repository, { gitPath: '/git' });
+    gitDir = '/after/.git';
+    gitExecCalls.length = 0;
+    assert.equal(await resetToOrigin(repository, { gitPath: '/git' }), false);
+    assert.equal(await rollback(repository, fetchedCommit, 'hard', {
+      gitPath: '/git', expectedHead: repository.state.HEAD,
+    }), false);
+    assert.ok(!gitExecCalls.some(([, args]) => args[0] === 'reset'));
+  } finally {
+    execFileImpl = originalExec;
+    readMarkerImpl = originalRead;
+  }
+});
+
+test('operation checks retry a failed Git directory resolution', async () => {
+  const original = execFileImpl;
+  let attempts = 0;
+  execFileImpl = async (...args) => {
+    if (++attempts === 1) throw new Error('Git unavailable');
+    return original(...args);
+  };
+  const repository = { rootUri: { fsPath: '/retry-repo' }, state: {} };
+  try {
+    await assert.rejects(operationState(repository, { gitPath: '/git' }), /Git unavailable/);
+    assert.equal(await operationState(repository, { gitPath: '/git' }), undefined);
+    assert.equal(attempts, 2);
   } finally {
     execFileImpl = original;
   }
@@ -264,6 +378,26 @@ test('pull from preserves no-verify while using the selected remote branch', asy
   assert.equal(await pullFrom(repository, { noVerify: true, gitPath: '/git' }), true);
   assert.deepEqual(calls, [['fetch', 'origin', 'main'], ['status']]);
   assert.deepEqual(gitExecCalls[0][1], ['merge', '--no-edit', '--no-verify', 'FETCH_HEAD']);
+});
+
+test('pull from returns false without fetching or merging when the branch picker is cancelled', async () => {
+  gitExecCalls.length = 0;
+  const calls = [];
+  const repository = {
+    rootUri: { fsPath: '/repo' },
+    state: { remotes: [{ name: 'origin', fetchUrl: 'git@example/repo.git' }] },
+    getRefs: async () => [{ name: 'origin/main' }],
+    fetch: async (...args) => calls.push(['fetch', ...args]),
+    status: async () => calls.push(['status']),
+  };
+  showQuickPickImpl = async () => undefined;
+  try {
+    assert.equal(await pullFrom(repository, { noVerify: true, gitPath: '/git' }), false);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(gitExecCalls, []);
+  } finally {
+    showQuickPickImpl = async (items) => items[0];
+  }
 });
 
 test('opens VS Code\'s stash picker for pop stash', async () => {
@@ -427,6 +561,37 @@ test('classifies cherry-pick and revert markers without mistaking stash conflict
   gitRefStates.clear();
 });
 
+test('No Verify skips hooks for each continuation and preserves the native merge path', async () => {
+  const calls = [];
+  const repository = {
+    rootUri: { fsPath: '/continue-no-verify' }, state: { mergeChanges: [] },
+    commit: async (...args) => calls.push(args), status: async () => {},
+  };
+  const options = { gitPath: '/git', noVerify: true };
+  try {
+    for (const [marker, operation] of [
+      ['REBASE_HEAD', 'rebase'], ['CHERRY_PICK_HEAD', 'cherry-pick'], ['REVERT_HEAD', 'revert'],
+    ]) {
+      gitRefStates.add(marker);
+      gitExecCalls.length = 0;
+      assert.equal(await continueOperation(repository, operation, '', options), true);
+      assert.deepEqual(gitExecCalls.at(-1)[1], ['-c', 'core.hooksPath=/dev/null', operation, '--continue']);
+      gitRefStates.clear();
+    }
+    repository.state.rebaseCommit = { hash: firstCommit, message: 'fix: rebased' };
+    assert.equal(await continueOperation(repository, 'rebase', '', options), true);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(gitExecCalls.at(-1)[1], ['-c', 'core.hooksPath=/dev/null', 'rebase', '--continue']);
+    assert.equal(gitExecCalls.at(-1)[2].env.GIT_EDITOR, 'true');
+    repository.state.rebaseCommit = undefined;
+    gitRefStates.add('MERGE_HEAD');
+    assert.equal(await continueOperation(repository, 'merge', 'Merge branch', options), true);
+    assert.deepEqual(calls, [['Merge branch', { noVerify: true }]]);
+  } finally {
+    gitRefStates.clear();
+  }
+});
+
 test('reset and rollback refuse a changed live HEAD before destructive commands', async () => {
   const repository = {
     rootUri: { fsPath: '/repo' }, state: {
@@ -542,6 +707,34 @@ test('abort refuses a different same-type operation after the confirmation dialo
   }
 });
 
+test('abort refuses stale operation markers after the Git directory changes during confirmation', async () => {
+  const originalExec = execFileImpl;
+  const originalRead = readMarkerImpl;
+  const originalWarning = showWarningMessageImpl;
+  let gitDir = '/before/.git';
+  execFileImpl = async (file, args, options) => args.includes('--absolute-git-dir')
+    ? { stdout: `${gitDir}\n`, stderr: '' } : originalExec(file, args, options);
+  readMarkerImpl = async (file) => file === '/before/.git/CHERRY_PICK_HEAD'
+    ? `${fetchedCommit}\n` : originalRead(file);
+  showWarningMessageImpl = async (...args) => {
+    gitDir = '/after/.git';
+    return args.at(-1);
+  };
+  const repository = {
+    rootUri: { fsPath: '/abort-reopened-repo' }, state: { mergeChanges: [] }, status: async () => {},
+  };
+  try {
+    await operationState(repository, { gitPath: '/git' });
+    gitExecCalls.length = 0;
+    assert.equal(await abortOperation(repository, 'cherry-pick', { gitPath: '/git' }), false);
+    assert.ok(!gitExecCalls.some(([, args]) => args.includes('--abort')));
+  } finally {
+    execFileImpl = originalExec;
+    readMarkerImpl = originalRead;
+    showWarningMessageImpl = originalWarning;
+  }
+});
+
 test('revert accepts one-parent commits and rejects merge commits', async () => {
   const repository = {
     rootUri: { fsPath: '/repo' }, state: { mergeChanges: [] }, status: async () => {},
@@ -571,11 +764,12 @@ test('shared direct runner preserves binary output and bounds subprocess time', 
   execFileImpl = async (_file, _args, options) => {
     assert.equal(options.encoding, 'buffer');
     assert.equal(options.timeout, 300_000);
+    assert.equal(options.maxBuffer, 32 * 1024 * 1024);
     return { stdout: Buffer.from([0, 255]), stderr: Buffer.alloc(0) };
   };
   try {
     const result = await execGitCommand({ rootUri: { fsPath: '/repo' } }, '/git', ['status'], {
-      encoding: 'buffer', timeout: 600_000,
+      encoding: 'buffer', timeout: 600_000, maxBuffer: 32 * 1024 * 1024,
     });
     assert.deepEqual(result.stdout, Buffer.from([0, 255]));
   } finally {

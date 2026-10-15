@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.1.13 — 2026-10-15
+
+### Added
+
+- Show a summary after Pull All and Fetch All with how many repositories finished and how many were skipped because they were busy.
+- Show an error row for a repository that fails to load while the other repositories keep rendering.
+
+### Changed
+
+- No Verify now applies to one operation: the next commit, continue, pull, push, publish, or amend. It clears after that operation succeeds.
+- Repositories appear as their data arrives, with renders throttled to at most one every 100 ms.
+- The commit graph author lookup tries public GitHub data first and asks for sign-in only when that lookup fails.
+
+### Fixed
+
+- AI conflict resolution stages files the AI deleted, so the merge or rebase can continue.
+- Commit messages no longer corrupt when multi-byte characters split across AI output chunks.
+- A superseded refresh no longer overwrites newer repository data.
+- Rebase, cherry-pick, revert, and merge continuations honor No Verify.
+- Invalid reasoning-effort settings are no longer rewritten on activation.
+- A slow Git operation in one repository no longer delays other repositories.
+- Git directory lookups are cached during refresh; destructive operations still resolve them fresh.
+- Large conflict sets no longer break Git operations.
+- Accessibility labels for the commit message box, file rows, and graph resizer.
+
 ## 1.1.12 — 2026-10-12
 
 ### Fixed

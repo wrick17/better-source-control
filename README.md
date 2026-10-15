@@ -17,6 +17,10 @@ Open **Better Source Control** from the Activity Bar. Each repository row has it
 
 The built-in Git extension must remain enabled because Better Source Control uses its official repository API. VS Code does not let extensions hide the built-in Source Control container, but you can right-click the Activity Bar and hide **Source Control** after installing this replacement view.
 
+Better Source Control removes VS Code's native Source Control history view once, the first time it activates, because its commit graph replaces it. It does not repeat the removal on later activations.
+
+Activation does not otherwise rewrite your settings. It moves legacy `gitChangeStats.ai.*` AI settings to their current keys when those keys are unset.
+
 Use **Better Source Control: Configure AI** for one global provider plus separate model and reasoning controls for commit messages and conflict resolution. An empty model uses the selected CLI's default.
 
 Generating a message sends the staged diff to the selected AI CLI, or the working-tree diff when nothing is staged. Untracked filenames are included, but their contents are excluded by default. Enable `gitChangeStats.includeUntrackedContent` to include up to 8 KiB per new text file and 64 KiB total; check for secrets before enabling it. Staging a new file includes its diff normally.

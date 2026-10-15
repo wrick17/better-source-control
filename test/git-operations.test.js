@@ -175,6 +175,23 @@ test('pull and push use native APIs normally and shell-free no-verify fallbacks'
   assert.ok(gitExecCalls.every(([, , options]) => options.maxBuffer === 16 * 1024 * 1024));
 });
 
+test('no-verify push succeeds when the follow-up status refresh fails', async () => {
+  gitExecCalls.length = 0;
+  const error = new Error('status unavailable');
+  const logs = [];
+  setLog({ error: (...args) => logs.push(args) });
+  try {
+    assert.equal(await push({
+      rootUri: { fsPath: '/repo' },
+      status: async () => { throw error; },
+    }, { noVerify: true, gitPath: '/git' }), true);
+    assert.deepEqual(gitExecCalls.map(([, args]) => args), [['push', '--no-verify']]);
+    assert.deepEqual(logs, [['[repo] Refreshing status failed.', error]]);
+  } finally {
+    setLog(undefined);
+  }
+});
+
 test('fetch uses the native repository API', async () => {
   const calls = [];
   const logs = [];

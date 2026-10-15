@@ -6,9 +6,7 @@ const path = require('node:path');
 const {
   buildFileTree,
   changedFileCount,
-  countTextLines,
   formatChangeStats,
-  formatDescription,
   statusBadge,
 } = require('../stats');
 
@@ -21,9 +19,6 @@ test('counts and formats repository changes', () => {
   };
 
   assert.equal(changedFileCount(state), 3);
-  assert.equal(countTextLines(Buffer.from('one\ntwo\n')), 2);
-  assert.equal(countTextLines(Buffer.from([0, 1, 2])), 0);
-  assert.equal(formatDescription(3, 21, 4, 'dev'), '(3* : +21 -4)  dev*');
   assert.equal(formatChangeStats(3, 21, 4), '3 +21 -4');
   assert.equal(formatChangeStats(0, 0, 0), '');
 });

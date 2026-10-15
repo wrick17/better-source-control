@@ -377,6 +377,15 @@ class RepositoryViewProvider {
     await this.refresh();
   }
 
+  // undefined means the attempt was cancelled before Git ran, so No Verify stays armed.
+  // A failure spends it unless a merge, rebase, cherry-pick, or revert is still pending.
+  async spendNoVerify(repository, succeeded) {
+    if (succeeded === undefined) return;
+    if (succeeded || !(await git.operationState(repository, { gitPath: this.api.git.path, fresh: true }))) {
+      await this.clearNoVerify(repository.rootUri.fsPath);
+    }
+  }
+
   // No Verify is one-shot: the hook-skipping operation that consumed it clears it.
   async clearNoVerify(repositoryId) {
     this.noVerify.delete(repositoryId);
@@ -772,17 +781,17 @@ class RepositoryViewProvider {
     }
     const noVerify = vscode.workspace.getConfiguration('gitChangeStats')
       .get('showNoVerifyButton', false) && this.noVerify.has(repository.rootUri.fsPath);
-    if (await git.amendMessage(repository, message, {
+    const amended = await git.amendMessage(repository, message, {
       noVerify, gitPath: this.api.git.path, expectedHead: { name: head.name, commit: head.commit },
-    })) {
-      if (noVerify) {
-        await this.clearNoVerify(repository.rootUri.fsPath);
-        await this.refresh();
-      }
-      this.graph.selectedHash = undefined;
-      this.graph.details = undefined;
-      await this.loadGraph();
+    });
+    if (noVerify) {
+      await this.spendNoVerify(repository, amended);
+      await this.refresh();
     }
+    if (!amended) return;
+    this.graph.selectedHash = undefined;
+    this.graph.details = undefined;
+    await this.loadGraph();
   }
 
   async handleMessage(message) {
@@ -1123,11 +1132,7 @@ class RepositoryViewProvider {
       if (change) await openDiff(this.api, repository, message.kind, change);
       return;
     }
-    // undefined means the user cancelled before Git ran, so the flag stays armed.
-    if (consumesNoVerify && succeeded !== undefined
-      && (succeeded || !await git.operationState(repository, { gitPath: this.api.git.path, fresh: true }))) {
-      await this.clearNoVerify(message.repositoryId);
-    }
+    if (consumesNoVerify) await this.spendNoVerify(repository, succeeded);
     await this.refresh();
     return outcome;
   }

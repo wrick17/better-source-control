@@ -201,7 +201,7 @@ async function continueOperation(repository, operation, message, options = {}) {
 // Git's own --no-verify skips only these two hooks, so every other active hook stays on.
 const VERIFY_HOOKS = ['commit-msg', 'pre-commit'];
 
-// Copies the active hooks minus the verify hooks into the git dir and returns that directory.
+// Writes a wrapper for each active hook except the verify hooks into the git dir and returns that directory.
 function noVerifyHooksPath(repository, gitPath) {
   return queueGit(repository, async () => {
     const gitDir = await resolveGitDir(repository, gitPath, true);
@@ -212,8 +212,13 @@ function noVerifyHooksPath(repository, gitPath) {
     await fs.mkdir(hooksDir);
     for (const name of await fs.readdir(activeDir).catch(() => [])) {
       const source = path.join(activeDir, name);
-      if (VERIFY_HOOKS.includes(name) || !(await fs.stat(source).catch(() => null))?.isFile()) continue;
-      await fs.copyFile(source, path.join(hooksDir, name));
+      const stat = await fs.stat(source).catch(() => null);
+      if (VERIFY_HOOKS.includes(name) || !stat?.isFile()) continue;
+      // Git skips non-executable hooks on POSIX, so the wrapper must not turn them on.
+      if (process.platform !== 'win32' && !(stat.mode & 0o111)) continue;
+      // exec runs the original file, so $0 and paths relative to it keep working.
+      const quoted = `'${source.replace(/'/g, `'\\''`)}'`;
+      await fs.writeFile(path.join(hooksDir, name), `#!/bin/sh\nexec ${quoted} "$@"\n`, { mode: 0o755 });
     }
     return hooksDir;
   });
@@ -300,27 +305,28 @@ function push(repository, { noVerify = false, gitPath } = {}) {
     : callApi(repository, 'push'));
 }
 
+// Returns undefined when Git was never run, so No Verify stays armed.
 async function publish(repository, { noVerify = false, gitPath } = {}) {
   if (!repository) return;
   const head = repository.state.HEAD;
   if (!head?.name || !head.commit) {
     await vscode.window.showInformationMessage('Check out a committed local branch before publishing.');
-    return false;
+    return;
   }
   if (head.upstream) {
     await vscode.window.showInformationMessage('This branch already has an upstream. Use Push instead.');
-    return false;
+    return;
   }
   const remotes = repository.state.remotes.filter((remote) => remote.pushUrl);
   if (!remotes.length) {
     await vscode.window.showInformationMessage('Configure a push remote before publishing.');
-    return false;
+    return;
   }
   const remote = remotes.length === 1 ? remotes[0] : await vscode.window.showQuickPick(
     remotes.map((item) => ({ label: item.name, description: item.pushUrl, remote: item })),
     { title: 'Publish Branch', placeHolder: 'Select a remote' },
   ).then((item) => item?.remote);
-  if (!remote) return false;
+  if (!remote) return;
   return run(repository, `Publishing ${head.name}`, async () => {
     if (repository.state.HEAD?.name !== head.name || repository.state.HEAD?.commit !== head.commit) {
       throw new Error('The current branch or commit changed before publishing.');

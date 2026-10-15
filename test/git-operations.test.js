@@ -267,7 +267,7 @@ test('operation checks refresh a cached Git directory after time passes', async 
   let gitDir = '/before/.git';
   execFileImpl = async (file, args, options) => args.includes('--absolute-git-dir')
     ? { stdout: `${gitDir}\n`, stderr: '' } : originalExec(file, args, options);
-  readMarkerImpl = async (file) => file === '/after/.git/CHERRY_PICK_HEAD'
+  readMarkerImpl = async (file) => file === path.join('/after/.git', 'CHERRY_PICK_HEAD')
     ? `${fetchedCommit}\n` : originalRead(file);
   const repository = { rootUri: { fsPath: '/reopened-repo' }, state: {} };
   try {
@@ -287,7 +287,7 @@ test('reset and rollback guard the current Git directory even while the refresh 
   let gitDir = '/before/.git';
   execFileImpl = async (file, args, options) => args.includes('--absolute-git-dir')
     ? { stdout: `${gitDir}\n`, stderr: '' } : originalExec(file, args, options);
-  readMarkerImpl = async (file) => file === '/after/.git/CHERRY_PICK_HEAD'
+  readMarkerImpl = async (file) => file === path.join('/after/.git', 'CHERRY_PICK_HEAD')
     ? `${fetchedCommit}\n` : originalRead(file);
   const repository = {
     rootUri: { fsPath: '/guarded-reopened-repo' },
@@ -714,7 +714,7 @@ test('abort refuses stale operation markers after the Git directory changes duri
   let gitDir = '/before/.git';
   execFileImpl = async (file, args, options) => args.includes('--absolute-git-dir')
     ? { stdout: `${gitDir}\n`, stderr: '' } : originalExec(file, args, options);
-  readMarkerImpl = async (file) => file === '/before/.git/CHERRY_PICK_HEAD'
+  readMarkerImpl = async (file) => file === path.join('/before/.git', 'CHERRY_PICK_HEAD')
     ? `${fetchedCommit}\n` : originalRead(file);
   showWarningMessageImpl = async (...args) => {
     gitDir = '/after/.git';

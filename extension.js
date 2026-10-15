@@ -1030,9 +1030,10 @@ class RepositoryViewProvider {
         .get('showNoVerifyButton', false) && this.noVerify.has(message.repositoryId),
       gitPath: this.api.git.path,
     };
-    // No Verify is spent only when its hook-skipping command reports success.
+    // No Verify is spent by a success, or by a failure that leaves no operation to continue.
     const consumesNoVerify = operationOptions.noVerify && (message.type === 'commit'
       || (message.type === 'continueOperation' && ['merge', 'rebase', 'cherry-pick', 'revert'].includes(message.operation))
+      || (message.type === 'abortOperation' && ['merge', 'rebase', 'cherry-pick', 'revert'].includes(message.operation))
       || (message.type === 'operation' && NO_VERIFY_OPERATIONS.includes(message.operation)));
     let outcome;
     let succeeded;
@@ -1044,7 +1045,7 @@ class RepositoryViewProvider {
       await ai.resolveConflicts(repository);
       await this.refresh();
     } else if (message.type === 'abortOperation' && ['merge', 'rebase', 'cherry-pick', 'revert'].includes(message.operation)) {
-      await git.abortOperation(repository, message.operation, operationOptions);
+      succeeded = await git.abortOperation(repository, message.operation, operationOptions);
     } else if (message.type === 'operation' && [
       'fetch', 'pullMerge', 'pullRebase', 'pullFrom', 'push', 'publish', 'resetToOrigin',
       'stash', 'popStashSelected', 'popStash', 'viewStash', 'applyStash', 'createWorktree',
@@ -1122,7 +1123,11 @@ class RepositoryViewProvider {
       if (change) await openDiff(this.api, repository, message.kind, change);
       return;
     }
-    if (consumesNoVerify && succeeded) await this.clearNoVerify(message.repositoryId);
+    // undefined means the user cancelled before Git ran, so the flag stays armed.
+    if (consumesNoVerify && succeeded !== undefined
+      && (succeeded || !await git.operationState(repository, { gitPath: this.api.git.path, fresh: true }))) {
+      await this.clearNoVerify(message.repositoryId);
+    }
     await this.refresh();
     return outcome;
   }

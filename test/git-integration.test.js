@@ -22,7 +22,7 @@ Module._load = function load(request, parent, isMain) {
   };
   return originalLoad.call(this, request, parent, isMain);
 };
-const { abortOperation, cherryPick, emptyTreeHash, operationState, publish, resetToOrigin, revertCommit, rollback } = require('../git-operations');
+const { abortOperation, cherryPick, continueOperation, emptyTreeHash, operationState, publish, resetToOrigin, revertCommit, rollback } = require('../git-operations');
 Module._load = originalLoad;
 
 const gitEnv = {
@@ -168,6 +168,45 @@ test('rollback refuses changed HEAD, and revert preserves published history', as
   assert.notEqual(git(repo, 'rev-parse', 'HEAD'), next);
   assert.equal(git(repo, 'merge-base', '--is-ancestor', next, 'HEAD'), '');
   assert.equal(fs.existsSync(path.join(repo, 'next.txt')), false);
+});
+
+test('No Verify cherry-pick and revert continuations skip only pre-commit and commit-msg', async (t) => {
+  const { dir, repo } = setup(t);
+  const log = path.join(dir, 'hooks.log');
+  const hooks = path.join(dir, 'hooks');
+  fs.mkdirSync(hooks);
+  for (const name of ['pre-commit', 'commit-msg', 'post-commit']) {
+    fs.writeFileSync(path.join(hooks, name), `#!/bin/sh\necho ${name} >> "${log}"\n`, { mode: 0o755 });
+  }
+  git(repo, 'config', 'core.hooksPath', hooks);
+  const hooksRun = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
+
+  git(repo, 'checkout', '-qb', 'topic');
+  fs.writeFileSync(path.join(repo, 'file.txt'), 'topic\n');
+  git(repo, 'commit', '-qam', 'topic');
+  const topic = git(repo, 'rev-parse', 'HEAD');
+  git(repo, 'checkout', '-q', 'main');
+  fs.writeFileSync(path.join(repo, 'file.txt'), 'main\n');
+  git(repo, 'commit', '-qam', 'main');
+  assert.throws(() => git(repo, 'cherry-pick', topic));
+  fs.writeFileSync(path.join(repo, 'file.txt'), 'resolved\n');
+  git(repo, 'add', 'file.txt');
+  fs.rmSync(log, { force: true });
+  assert.equal(await continueOperation(repository(repo), 'cherry-pick', '', { gitPath: 'git', noVerify: true }), true);
+  assert.deepEqual(hooksRun(), ['post-commit']);
+  assert.equal(git(repo, 'status', '--porcelain'), '');
+
+  fs.writeFileSync(path.join(repo, 'file.txt'), 'first\n');
+  git(repo, 'commit', '-qam', 'first');
+  fs.writeFileSync(path.join(repo, 'file.txt'), 'second\n');
+  git(repo, 'commit', '-qam', 'second');
+  assert.throws(() => git(repo, 'revert', '--no-edit', 'HEAD~1'));
+  fs.writeFileSync(path.join(repo, 'file.txt'), 'resolved\n');
+  git(repo, 'add', 'file.txt');
+  fs.rmSync(log, { force: true });
+  assert.equal(await continueOperation(repository(repo), 'revert', '', { gitPath: 'git', noVerify: true }), true);
+  assert.deepEqual(hooksRun(), ['post-commit']);
+  assert.equal(await operationState(repository(repo), { gitPath: 'git' }), undefined);
 });
 
 test('conflicting revert exposes revert recovery and leaves HEAD intact after abort', async (t) => {
